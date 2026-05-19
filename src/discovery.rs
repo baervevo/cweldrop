@@ -1,4 +1,5 @@
-use std::net::SocketAddr;
+use std::collections::HashSet;
+use std::net::{IpAddr, SocketAddr};
 
 use anyhow::{Context, Result};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
@@ -31,17 +32,19 @@ impl Discovery {
             ("username", username),
             ("version", env!("CARGO_PKG_VERSION")),
         ];
-        // Empty addrs slice + enable_addr_auto lets mdns-sd pick all interfaces.
+        // Advertise only routable addresses. Link-local IPv6 (fe80::/10) requires a
+        // scope_id that mdns-sd does not propagate to clients, so connect() fails
+        // with EINVAL. Filter it out at the source.
+        let addrs = routable_local_addrs();
         let info = ServiceInfo::new(
             SERVICE_TYPE,
             &instance_name,
             &host_local,
-            "",
+            &addrs[..],
             port,
             &props[..],
         )
-        .context("ServiceInfo")?
-        .enable_addr_auto();
+        .context("ServiceInfo")?;
 
         daemon.register(info).context("register mdns service")?;
         info!(%instance_name, port, "mdns registered");
@@ -68,7 +71,7 @@ impl Discovery {
                             continue;
                         }
                         let port = info.get_port();
-                        let Some(ip) = info.get_addresses().iter().next().copied() else {
+                        let Some(ip) = pick_addr(info.get_addresses().iter().copied()) else {
                             continue;
                         };
                         let sock = SocketAddr::new(ip, port);
@@ -101,4 +104,60 @@ impl Discovery {
 
 pub fn peer_id_from_instance(fullname: &str) -> PeerId {
     format!("mdns:{fullname}")
+}
+
+fn is_ipv6_link_local(ip: &std::net::Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xffc0) == 0xfe80
+}
+
+fn routable_local_addrs() -> Vec<IpAddr> {
+    let Ok(ifaces) = if_addrs::get_if_addrs() else {
+        return Vec::new();
+    };
+    let mut seen: HashSet<IpAddr> = HashSet::new();
+    let mut out = Vec::new();
+    for iface in ifaces {
+        if iface.is_loopback() {
+            continue;
+        }
+        let ip = iface.ip();
+        if let IpAddr::V6(v6) = ip {
+            if is_ipv6_link_local(&v6) {
+                continue;
+            }
+        }
+        if seen.insert(ip) {
+            out.push(ip);
+        }
+    }
+    out
+}
+
+// Prefer routable addresses: IPv4, then global IPv6. Link-local IPv6 (fe80::/10)
+// requires a scope_id that mdns-sd does not surface, and connect() fails with EINVAL.
+fn pick_addr<I: IntoIterator<Item = IpAddr>>(addrs: I) -> Option<IpAddr> {
+    let mut v4 = None;
+    let mut v6_global = None;
+    let mut v6_link = None;
+    for ip in addrs {
+        match ip {
+            IpAddr::V4(_) => {
+                if v4.is_none() {
+                    v4 = Some(ip);
+                }
+            }
+            IpAddr::V6(a) => {
+                let seg = a.segments()[0];
+                let is_link_local = (seg & 0xffc0) == 0xfe80;
+                if is_link_local {
+                    if v6_link.is_none() {
+                        v6_link = Some(ip);
+                    }
+                } else if v6_global.is_none() {
+                    v6_global = Some(ip);
+                }
+            }
+        }
+    }
+    v4.or(v6_global).or(v6_link)
 }
