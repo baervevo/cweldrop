@@ -21,6 +21,7 @@ pub enum AppEvent {
     PeerConnected {
         id: PeerId,
         username: String,
+        resolved_id: Option<PeerId>,
     },
     PeerDisconnected {
         id: PeerId,

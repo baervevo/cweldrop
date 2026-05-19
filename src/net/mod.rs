@@ -30,6 +30,7 @@ struct PeerHandle {
 
 pub struct NetSupervisor {
     username: String,
+    self_peer_id: Option<String>,
     peers: HashMap<PeerId, PeerHandle>,
     cmd_rx: mpsc::Receiver<NetCmd>,
     evt_tx: mpsc::Sender<AppEvent>,
@@ -38,11 +39,13 @@ pub struct NetSupervisor {
 impl NetSupervisor {
     pub fn new(
         username: String,
+        self_peer_id: Option<String>,
         cmd_rx: mpsc::Receiver<NetCmd>,
         evt_tx: mpsc::Sender<AppEvent>,
     ) -> Self {
         Self {
             username,
+            self_peer_id,
             peers: HashMap::new(),
             cmd_rx,
             evt_tx,
@@ -74,6 +77,7 @@ impl NetSupervisor {
                     return;
                 }
                 let username = self.username.clone();
+                let self_peer_id = self.self_peer_id.clone();
                 let evt_tx = self.evt_tx.clone();
                 let (out_tx, out_rx) = mpsc::channel::<Message>(64);
                 self.peers
@@ -81,7 +85,7 @@ impl NetSupervisor {
                 tokio::spawn(async move {
                     match TcpStream::connect(addr).await {
                         Ok(stream) => {
-                            peer::run_peer(id, stream, addr, username, out_rx, evt_tx, true).await;
+                            peer::run_peer(id, stream, addr, username, self_peer_id, out_rx, evt_tx, true).await;
                         }
                         Err(e) => {
                             warn!(error=%e, %addr, "dial failed");
@@ -121,23 +125,29 @@ impl NetSupervisor {
             .insert(id.clone(), PeerHandle { tx: out_tx });
         let evt_tx = self.evt_tx.clone();
         let username = self.username.clone();
+        let self_peer_id = self.self_peer_id.clone();
         tokio::spawn(async move {
-            peer::run_peer(id, stream, addr, username, out_rx, evt_tx, false).await;
+            peer::run_peer(id, stream, addr, username, self_peer_id, out_rx, evt_tx, false).await;
         });
     }
 }
 
 /// Glue: own a NetSupervisor + server, run them together.
-pub async fn run_net(
+pub async fn run_net<F>(
     bind_port: u16,
     username: String,
+    peer_id_for_port: F,
     cmd_rx: mpsc::Receiver<NetCmd>,
     evt_tx: mpsc::Sender<AppEvent>,
-) -> Result<u16> {
+) -> Result<u16>
+where
+    F: FnOnce(u16) -> Option<String>,
+{
     let (incoming_tx, incoming_rx) = mpsc::channel::<(TcpStream, SocketAddr)>(32);
     let (listener, actual_port) = server::bind(bind_port).await?;
+    let self_peer_id = peer_id_for_port(actual_port);
     tokio::spawn(server::accept_loop(listener, incoming_tx));
-    let sup = NetSupervisor::new(username, cmd_rx, evt_tx);
+    let sup = NetSupervisor::new(username, self_peer_id, cmd_rx, evt_tx);
     tokio::spawn(sup.run(incoming_rx));
     Ok(actual_port)
 }

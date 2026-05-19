@@ -15,6 +15,7 @@ pub async fn run_peer(
     stream: TcpStream,
     addr: SocketAddr,
     self_username: String,
+    self_peer_id: Option<String>,
     mut out_rx: mpsc::Receiver<Message>,
     evt_tx: mpsc::Sender<AppEvent>,
     dialed: bool,
@@ -23,8 +24,11 @@ pub async fn run_peer(
     let (r, mut w) = stream.into_split();
     let mut r = BufReader::new(r);
 
-    // Send hello first.
-    if let Err(e) = write_frame(&mut w, &Message::hello(&self_username)).await {
+    let hello = match &self_peer_id {
+        Some(pid) => Message::hello_with_id(&self_username, pid),
+        None => Message::hello(&self_username),
+    };
+    if let Err(e) = write_frame(&mut w, &hello).await {
         warn!(error=%e, %addr, "hello write failed");
         let _ = evt_tx
             .send(AppEvent::PeerError {
@@ -49,12 +53,13 @@ pub async fn run_peer(
             res = read_frame(&mut r) => {
                 match res {
                     Ok(Some(msg)) => match msg {
-                        Message::Hello { username, version } => {
+                        Message::Hello { username, version, peer_id: remote_peer_id } => {
                             debug!(%username, %version, %addr, "peer hello");
                             remote_username = Some(username.clone());
                             let _ = evt_tx.send(AppEvent::PeerConnected {
                                 id: id.clone(),
                                 username,
+                                resolved_id: remote_peer_id,
                             }).await;
                         }
                         Message::Text { body } => {

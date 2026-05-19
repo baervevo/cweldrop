@@ -10,6 +10,8 @@ pub enum Message {
     Hello {
         username: String,
         version: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer_id: Option<String>,
     },
     Text {
         body: String,
@@ -22,6 +24,15 @@ impl Message {
         Self::Hello {
             username: username.into(),
             version: PROTOCOL_VERSION.to_string(),
+            peer_id: None,
+        }
+    }
+
+    pub fn hello_with_id(username: impl Into<String>, peer_id: impl Into<String>) -> Self {
+        Self::Hello {
+            username: username.into(),
+            version: PROTOCOL_VERSION.to_string(),
+            peer_id: Some(peer_id.into()),
         }
     }
 

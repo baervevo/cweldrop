@@ -143,7 +143,30 @@ impl App {
                     });
                 }
             }
-            AppEvent::PeerConnected { id, username } => {
+            AppEvent::PeerConnected { id, username, resolved_id } => {
+                // If the remote advertised its mdns peer_id and we already have a
+                // discovery-only entry under that id, merge: keep the connected
+                // (current) entry, drop the duplicate.
+                if let Some(other) = resolved_id.as_ref() {
+                    if other != &id {
+                        if let Some(cur_idx) = self.peer_index(&id) {
+                            if let Some(dup_idx) = self.peer_index(other) {
+                                // Preserve any history accumulated under the duplicate.
+                                if let Some(hist) = self.history.remove(other) {
+                                    self.history.entry(id.clone()).or_default().extend(hist);
+                                }
+                                // Inherit a better addr if we have none.
+                                if self.peers[cur_idx].addr.is_none() {
+                                    self.peers[cur_idx].addr = self.peers[dup_idx].addr;
+                                }
+                                self.peers.remove(dup_idx);
+                                if self.selected >= self.peers.len() && !self.peers.is_empty() {
+                                    self.selected = self.peers.len() - 1;
+                                }
+                            }
+                        }
+                    }
+                }
                 if let Some(idx) = self.peer_index(&id) {
                     self.peers[idx].status = PeerStatus::Online;
                     if !username.is_empty() {

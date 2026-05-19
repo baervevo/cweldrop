@@ -59,8 +59,22 @@ async fn main() -> Result<()> {
     let (evt_tx, mut evt_rx) = mpsc::channel::<AppEvent>(256);
     let (cmd_tx, cmd_rx) = mpsc::channel::<NetCmd>(256);
 
-    let actual_port =
-        net::run_net(cli.port, username.clone(), cmd_rx, evt_tx.clone()).await?;
+    let mdns_enabled = !cli.no_mdns;
+    let username_for_id = username.clone();
+    let actual_port = net::run_net(
+        cli.port,
+        username.clone(),
+        |port| {
+            if mdns_enabled {
+                Some(discovery::self_peer_id(&username_for_id, port))
+            } else {
+                None
+            }
+        },
+        cmd_rx,
+        evt_tx.clone(),
+    )
+    .await?;
 
     let discovery = if cli.no_mdns {
         None

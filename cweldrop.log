@@ -7,3 +7,23 @@
 2026-05-19T15:48:51.793272Z  INFO cweldrop::net::server: inbound connection addr=192.168.122.1:55846
 2026-05-19T15:49:07.407981Z  INFO cweldrop::net::peer: peer closed addr=172.19.0.1:7421
 2026-05-19T15:49:09.011353Z  INFO cweldrop::net: supervisor shutdown
+2026-05-19T15:50:53.799703Z  INFO cweldrop: starting cweldrop username=mariusz port=7422
+2026-05-19T15:50:53.799824Z  INFO cweldrop::net::server: listening addr=0.0.0.0:7422 actual_port=7422
+2026-05-19T15:50:53.800514Z  INFO cweldrop::discovery: mdns registered instance_name=mariusz@mariusztop-7422 port=7422
+2026-05-19T15:52:23.558343Z  INFO cweldrop: starting cweldrop username=mariusz port=7422
+2026-05-19T15:52:23.558463Z  INFO cweldrop::net::server: listening addr=0.0.0.0:7422 actual_port=7422
+2026-05-19T15:52:23.559124Z  INFO cweldrop::discovery: mdns registered instance_name=mariusz@mariusztop-7422 port=7422
+2026-05-19T15:52:25.611883Z  WARN cweldrop::net: dial failed error=Invalid argument (os error 22) addr=[fe80::1040:5bff:feb2:c42f]:7421
+2026-05-19T15:53:04.232491Z  INFO cweldrop: starting cweldrop username=mariusz port=7422
+2026-05-19T15:53:04.232620Z  INFO cweldrop::net::server: listening addr=0.0.0.0:7422 actual_port=7422
+2026-05-19T15:53:04.233315Z  INFO cweldrop::discovery: mdns registered instance_name=mariusz@mariusztop-7422 port=7422
+2026-05-19T15:53:06.817289Z  WARN cweldrop::net: dial failed error=Invalid argument (os error 22) addr=[fe80::1040:5bff:feb2:c42f]:7421
+2026-05-19T15:53:42.189761Z  INFO cweldrop: starting cweldrop username=mariusz port=7422
+2026-05-19T15:53:42.189889Z  INFO cweldrop::net::server: listening addr=0.0.0.0:7422 actual_port=7422
+2026-05-19T15:53:42.190546Z  INFO cweldrop::discovery: mdns registered instance_name=mariusz@mariusztop-7422 port=7422
+2026-05-19T15:55:09.191277Z  WARN cweldrop::net: dial failed error=Invalid argument (os error 22) addr=[fe80::1040:5bff:feb2:c42f]:7421
+2026-05-19T15:55:23.971483Z  INFO cweldrop::net: supervisor shutdown
+2026-05-19T15:57:00.276205Z  INFO cweldrop: starting cweldrop username=mariusz port=7422
+2026-05-19T15:57:00.276448Z  INFO cweldrop::net::server: listening addr=0.0.0.0:7422 actual_port=7422
+2026-05-19T15:57:00.277529Z  INFO cweldrop::discovery: mdns registered instance_name=mariusz@mariusztop-7422 port=7422
+2026-05-19T15:57:02.722227Z  INFO cweldrop::net::server: inbound connection addr=10.252.200.134:44514

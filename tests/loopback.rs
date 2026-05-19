@@ -9,13 +9,13 @@ use tokio::sync::mpsc;
 async fn two_supervisors_exchange_text() {
     let (a_evt_tx, mut a_evt_rx) = mpsc::channel::<AppEvent>(64);
     let (a_cmd_tx, a_cmd_rx) = mpsc::channel::<NetCmd>(64);
-    let a_port = net::run_net(0, "alice".to_string(), a_cmd_rx, a_evt_tx)
+    let a_port = net::run_net(0, "alice".to_string(), |_| None, a_cmd_rx, a_evt_tx)
         .await
         .expect("start A");
 
     let (b_evt_tx, mut b_evt_rx) = mpsc::channel::<AppEvent>(64);
     let (b_cmd_tx, b_cmd_rx) = mpsc::channel::<NetCmd>(64);
-    let _b_port = net::run_net(0, "bob".to_string(), b_cmd_rx, b_evt_tx)
+    let _b_port = net::run_net(0, "bob".to_string(), |_| None, b_cmd_rx, b_evt_tx)
         .await
         .expect("start B");
 
@@ -42,7 +42,7 @@ async fn two_supervisors_exchange_text() {
     let a_inbound_id = expect_event_extract(
         &mut a_evt_rx,
         |e| {
-            if let AppEvent::PeerConnected { id, username } = e {
+            if let AppEvent::PeerConnected { id, username, .. } = e {
                 if username == "bob" { Some(id.clone()) } else { None }
             } else {
                 None

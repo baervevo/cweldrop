@@ -106,6 +106,17 @@ pub fn peer_id_from_instance(fullname: &str) -> PeerId {
     format!("mdns:{fullname}")
 }
 
+// Mirrors the fullname mdns-sd will publish for this host, so peers and self
+// agree on the same PeerId.
+pub fn self_peer_id(username: &str, port: u16) -> PeerId {
+    let host = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "host".to_string());
+    let fullname = format!("{username}@{host}-{port}.{SERVICE_TYPE}");
+    peer_id_from_instance(&fullname)
+}
+
 fn is_ipv6_link_local(ip: &std::net::Ipv6Addr) -> bool {
     (ip.segments()[0] & 0xffc0) == 0xfe80
 }
