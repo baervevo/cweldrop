@@ -191,6 +191,7 @@ impl App {
             } => {
                 if let Some(idx) = self.peer_index(&id) {
                     let conn_id = self.peers[idx].id.clone();
+                    let auth_ip = self.peers[idx].addr.map(|a| a.ip());
                     self.peers[idx].pubkey = Some(pubkey.clone());
                     if !username.is_empty() {
                         self.peers[idx].username = username;
@@ -222,8 +223,37 @@ impl App {
                     // id before authentication completed.
                     if conn_id != pubkey {
                         if let Some(pre) = self.history.remove(&conn_id) {
-                            self.history.entry(pubkey).or_default().extend(pre);
+                            self.history.entry(pubkey.clone()).or_default().extend(pre);
                         }
+                    }
+
+                    // Dedup rows that refer to the same physical peer: any other
+                    // row with the same verified pubkey, or a pubkey-less row at
+                    // the same address IP (an mDNS discovery shadow of this
+                    // freshly authenticated connection).
+                    let auth_id = self.peers[idx].id.clone();
+                    let dup_ids: Vec<String> = self
+                        .peers
+                        .iter()
+                        .filter(|p| p.id != auth_id)
+                        .filter(|p| {
+                            p.pubkey.as_deref() == Some(pubkey.as_str())
+                                || (p.pubkey.is_none()
+                                    && auth_ip.is_some()
+                                    && p.addr.map(|a| a.ip()) == auth_ip)
+                        })
+                        .map(|p| p.id.clone())
+                        .collect();
+                    for did in dup_ids {
+                        if let Some(pre) = self.history.remove(&did) {
+                            self.history.entry(pubkey.clone()).or_default().extend(pre);
+                        }
+                        if let Some(pos) = self.peer_index(&did) {
+                            self.peers.remove(pos);
+                        }
+                    }
+                    if self.selected >= self.peers.len() {
+                        self.selected = self.peers.len().saturating_sub(1);
                     }
                 }
             }
@@ -321,5 +351,104 @@ fn system_time_from_chrono(dt: DateTime<Utc>) -> SystemTime {
         SystemTime::UNIX_EPOCH + std::time::Duration::new(secs as u64, nanos)
     } else {
         SystemTime::UNIX_EPOCH - std::time::Duration::new((-secs) as u64, 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    fn unique_pubkey() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        format!("{nanos:032x}{n:032x}")
+    }
+
+    #[test]
+    fn authenticated_peer_dedups_mdns_shadow() {
+        let mut app = App::new("me".to_string(), 7421);
+        let listen_addr: SocketAddr = "192.0.2.7:7421".parse().unwrap();
+        let inbound_src: SocketAddr = "192.0.2.7:44514".parse().unwrap();
+        let mdns_id = "mdns:alice@host._cweldrop._tcp.local.".to_string();
+        let inbound_id = "inbound:192.0.2.7:44514".to_string();
+        let pubkey = unique_pubkey();
+
+        app.on_event(AppEvent::PeerDiscovered {
+            id: mdns_id.clone(),
+            username: "alice".into(),
+            addr: listen_addr,
+        });
+        assert_eq!(app.peers.len(), 1, "discovery creates one row");
+
+        app.on_event(AppEvent::PeerConnecting {
+            id: inbound_id.clone(),
+            addr: inbound_src,
+            dialed: false,
+        });
+        assert_eq!(
+            app.peers.len(),
+            2,
+            "inbound peer adds a second row before auth"
+        );
+
+        app.on_event(AppEvent::PeerAuthenticated {
+            id: inbound_id.clone(),
+            pubkey: pubkey.clone(),
+            username: "alice".into(),
+        });
+
+        assert_eq!(
+            app.peers.len(),
+            1,
+            "auth must collapse mDNS shadow into the connected row"
+        );
+        let p = &app.peers[0];
+        assert_eq!(p.id, inbound_id, "kept the connected row's id");
+        assert_eq!(p.pubkey.as_deref(), Some(pubkey.as_str()));
+        assert_eq!(p.status, PeerStatus::Online);
+        assert_eq!(p.username, "alice");
+    }
+
+    #[test]
+    fn authenticated_peer_dedups_other_pubkey_row() {
+        let mut app = App::new("me".to_string(), 7421);
+        let addr_a: SocketAddr = "192.0.2.7:7421".parse().unwrap();
+        let addr_b: SocketAddr = "192.0.2.7:55555".parse().unwrap();
+        let pubkey = unique_pubkey();
+
+        app.on_event(AppEvent::PeerConnecting {
+            id: "first".into(),
+            addr: addr_a,
+            dialed: true,
+        });
+        app.on_event(AppEvent::PeerAuthenticated {
+            id: "first".into(),
+            pubkey: pubkey.clone(),
+            username: "alice".into(),
+        });
+
+        app.on_event(AppEvent::PeerConnecting {
+            id: "second".into(),
+            addr: addr_b,
+            dialed: true,
+        });
+        app.on_event(AppEvent::PeerAuthenticated {
+            id: "second".into(),
+            pubkey: pubkey.clone(),
+            username: "alice".into(),
+        });
+
+        assert_eq!(
+            app.peers.len(),
+            1,
+            "two connections to the same pubkey must collapse to one row"
+        );
+        assert_eq!(app.peers[0].id, "second");
     }
 }
