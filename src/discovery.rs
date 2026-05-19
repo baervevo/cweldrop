@@ -6,7 +6,6 @@ use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
-
 use crate::event::AppEvent;
 use crate::net::PeerId;
 

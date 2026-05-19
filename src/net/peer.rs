@@ -138,8 +138,7 @@ pub async fn run_peer(
                         }
                     };
                     // Verify: local_nonce || my_pubkey || remote_pubkey
-                    let mut to_verify =
-                        Vec::with_capacity(local_nonce.len() + 32 + 32);
+                    let mut to_verify = Vec::with_capacity(local_nonce.len() + 32 + 32);
                     to_verify.extend_from_slice(&local_nonce);
                     to_verify.extend_from_slice(&my_pubkey);
                     to_verify.extend_from_slice(&rpk);

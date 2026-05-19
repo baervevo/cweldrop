@@ -24,8 +24,8 @@ impl Identity {
         fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
         let key_path = dir.join(KEY_FILE);
         let signing = if key_path.exists() {
-            let bytes = fs::read(&key_path)
-                .with_context(|| format!("read {}", key_path.display()))?;
+            let bytes =
+                fs::read(&key_path).with_context(|| format!("read {}", key_path.display()))?;
             if bytes.len() != SECRET_KEY_LENGTH {
                 return Err(anyhow!(
                     "{} has wrong length: {} (expected {})",

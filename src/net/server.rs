@@ -13,10 +13,7 @@ pub async fn bind(port: u16) -> Result<(TcpListener, u16)> {
     Ok((listener, actual))
 }
 
-pub async fn accept_loop(
-    listener: TcpListener,
-    out: mpsc::Sender<(TcpStream, SocketAddr)>,
-) {
+pub async fn accept_loop(listener: TcpListener, out: mpsc::Sender<(TcpStream, SocketAddr)>) {
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {

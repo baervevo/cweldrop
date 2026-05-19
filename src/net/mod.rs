@@ -82,12 +82,14 @@ impl NetSupervisor {
                 let identity = Arc::clone(&self.identity);
                 let evt_tx = self.evt_tx.clone();
                 let (out_tx, out_rx) = mpsc::channel::<Message>(64);
-                self.peers
-                    .insert(id.clone(), PeerHandle { tx: out_tx });
+                self.peers.insert(id.clone(), PeerHandle { tx: out_tx });
                 tokio::spawn(async move {
                     match TcpStream::connect(addr).await {
                         Ok(stream) => {
-                            peer::run_peer(id, stream, addr, username, identity, out_rx, evt_tx, true).await;
+                            peer::run_peer(
+                                id, stream, addr, username, identity, out_rx, evt_tx, true,
+                            )
+                            .await;
                         }
                         Err(e) => {
                             warn!(error=%e, %addr, "dial failed");
@@ -123,8 +125,7 @@ impl NetSupervisor {
             return;
         }
         let (out_tx, out_rx) = mpsc::channel::<Message>(64);
-        self.peers
-            .insert(id.clone(), PeerHandle { tx: out_tx });
+        self.peers.insert(id.clone(), PeerHandle { tx: out_tx });
         let evt_tx = self.evt_tx.clone();
         let username = self.username.clone();
         let identity = Arc::clone(&self.identity);

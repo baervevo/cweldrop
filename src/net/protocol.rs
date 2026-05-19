@@ -57,26 +57,20 @@ impl Message {
     }
 }
 
-pub async fn write_frame(
-    w: &mut OwnedWriteHalf,
-    msg: &Message,
-) -> std::io::Result<()> {
+pub async fn write_frame(w: &mut OwnedWriteHalf, msg: &Message) -> std::io::Result<()> {
     let mut line = serde_json::to_vec(msg).map_err(std::io::Error::other)?;
     line.push(b'\n');
     w.write_all(&line).await?;
     w.flush().await
 }
 
-pub async fn read_frame(
-    r: &mut BufReader<OwnedReadHalf>,
-) -> std::io::Result<Option<Message>> {
+pub async fn read_frame(r: &mut BufReader<OwnedReadHalf>) -> std::io::Result<Option<Message>> {
     let mut buf = String::new();
     let n = r.read_line(&mut buf).await?;
     if n == 0 {
         return Ok(None);
     }
-    let msg = serde_json::from_str::<Message>(buf.trim_end())
-        .map_err(std::io::Error::other)?;
+    let msg = serde_json::from_str::<Message>(buf.trim_end()).map_err(std::io::Error::other)?;
     Ok(Some(msg))
 }
 
@@ -106,7 +100,9 @@ mod tests {
 
     #[test]
     fn auth_roundtrip() {
-        let m = Message::Auth { signature: "1234".into() };
+        let m = Message::Auth {
+            signature: "1234".into(),
+        };
         let s = serde_json::to_string(&m).unwrap();
         assert!(s.contains("\"kind\":\"auth\""));
         let back: Message = serde_json::from_str(&s).unwrap();

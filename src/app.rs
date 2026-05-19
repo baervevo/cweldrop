@@ -10,7 +10,7 @@ use crate::net::{NetCmd, PeerId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerStatus {
-    Available,    // discovered via mDNS, not yet connected
+    Available, // discovered via mDNS, not yet connected
     Connecting,
     Online,
     Offline,
@@ -172,7 +172,11 @@ impl App {
                     });
                 }
             }
-            AppEvent::PeerConnected { id, username, resolved_id: _ } => {
+            AppEvent::PeerConnected {
+                id,
+                username,
+                resolved_id: _,
+            } => {
                 if let Some(idx) = self.peer_index(&id) {
                     self.peers[idx].status = PeerStatus::Online;
                     if !username.is_empty() {
@@ -180,7 +184,11 @@ impl App {
                     }
                 }
             }
-            AppEvent::PeerAuthenticated { id, pubkey, username } => {
+            AppEvent::PeerAuthenticated {
+                id,
+                pubkey,
+                username,
+            } => {
                 if let Some(idx) = self.peer_index(&id) {
                     let conn_id = self.peers[idx].id.clone();
                     self.peers[idx].pubkey = Some(pubkey.clone());
@@ -315,4 +323,3 @@ fn system_time_from_chrono(dt: DateTime<Utc>) -> SystemTime {
         SystemTime::UNIX_EPOCH - std::time::Duration::new((-secs) as u64, 0)
     }
 }
-

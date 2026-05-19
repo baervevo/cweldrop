@@ -47,7 +47,12 @@ fn draw_peers(f: &mut Frame, app: &App, area: Rect) {
 
     let border = peer_border_style(app);
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("peers").border_style(border))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("peers")
+                .border_style(border),
+        )
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
     let mut state = ListState::default();
@@ -90,10 +95,20 @@ fn draw_right(f: &mut Frame, app: &App, area: Rect) {
                 .iter()
                 .map(|cl| {
                     let is_me = cl.from == app.self_username;
-                    let color = if is_me { Color::LightBlue } else { Color::LightGreen };
+                    let color = if is_me {
+                        Color::LightBlue
+                    } else {
+                        Color::LightGreen
+                    };
                     Line::from(vec![
-                        Span::styled(format!("[{}] ", format_hms(cl.at)), Style::default().fg(Color::DarkGray)),
-                        Span::styled(format!("{}: ", cl.from), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            format!("[{}] ", format_hms(cl.at)),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::styled(
+                            format!("{}: ", cl.from),
+                            Style::default().fg(color).add_modifier(Modifier::BOLD),
+                        ),
                         Span::raw(cl.body.clone()),
                     ])
                 })
@@ -101,7 +116,9 @@ fn draw_right(f: &mut Frame, app: &App, area: Rect) {
             let title = match p.status {
                 PeerStatus::Online => format!("chat with {} [online]", p.username),
                 PeerStatus::Connecting => format!("chat with {} [connecting…]", p.username),
-                PeerStatus::Available => format!("chat with {} [press Enter to connect]", p.username),
+                PeerStatus::Available => {
+                    format!("chat with {} [press Enter to connect]", p.username)
+                }
                 PeerStatus::Offline => format!("chat with {} [offline]", p.username),
                 PeerStatus::Error => format!(
                     "chat with {} [error: {}]",
@@ -126,17 +143,30 @@ fn draw_right(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(chat, rows[0]);
 
     let (input_title, content) = if app.focus == Focus::Command {
-        ("command (Enter=run, Esc=cancel)".to_string(), format!(":{}", app.command))
+        (
+            "command (Enter=run, Esc=cancel)".to_string(),
+            format!(":{}", app.command),
+        )
     } else {
-        ("input (Enter=send, : =command, Tab=switch)".to_string(), format!("> {}", app.input))
+        (
+            "input (Enter=send, : =command, Tab=switch)".to_string(),
+            format!("> {}", app.input),
+        )
     };
-    let input = Paragraph::new(content)
-        .block(Block::default().borders(Borders::ALL).title(input_title).border_style(input_border_style(app)));
+    let input = Paragraph::new(content).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(input_title)
+            .border_style(input_border_style(app)),
+    );
     f.render_widget(input, rows[1]);
 }
 
 fn format_hms(t: std::time::SystemTime) -> String {
-    let secs = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let h = (secs / 3600) % 24;
     let m = (secs / 60) % 60;
     let s = secs % 60;
