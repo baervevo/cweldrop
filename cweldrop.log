@@ -27,3 +27,16 @@
 2026-05-19T15:57:00.276448Z  INFO cweldrop::net::server: listening addr=0.0.0.0:7422 actual_port=7422
 2026-05-19T15:57:00.277529Z  INFO cweldrop::discovery: mdns registered instance_name=mariusz@mariusztop-7422 port=7422
 2026-05-19T15:57:02.722227Z  INFO cweldrop::net::server: inbound connection addr=10.252.200.134:44514
+2026-05-19T16:01:33.551945Z  INFO cweldrop: starting cweldrop username=mariusz port=7422
+2026-05-19T16:01:33.552130Z  INFO cweldrop::net::server: listening addr=0.0.0.0:7422 actual_port=7422
+2026-05-19T16:01:33.552980Z  INFO cweldrop::discovery: mdns registered instance_name=mariusz@mariusztop-7422 port=7422
+2026-05-19T16:01:53.040449Z  INFO cweldrop: starting cweldrop username=mariusz port=7422
+2026-05-19T16:01:53.040496Z  INFO cweldrop::net::server: listening addr=0.0.0.0:7422 actual_port=7422
+2026-05-19T16:01:53.040870Z  INFO cweldrop::discovery: mdns registered instance_name=mariusz@mariusztop-7422 port=7422
+2026-05-19T16:02:22.094358Z  INFO cweldrop::net::server: inbound connection addr=10.252.200.134:60394
+2026-05-19T16:02:49.785087Z  INFO cweldrop::net: supervisor shutdown
+2026-05-19T16:02:54.057382Z  INFO cweldrop: starting cweldrop username=mariusz port=7422
+2026-05-19T16:02:54.057437Z  INFO cweldrop::net::server: listening addr=0.0.0.0:7422 actual_port=7422
+2026-05-19T16:02:54.057980Z  INFO cweldrop::discovery: mdns registered instance_name=mariusz@mariusztop-7422 port=7422
+2026-05-19T16:02:55.220967Z  INFO cweldrop::net::server: inbound connection addr=10.252.200.134:52080
+2026-05-19T16:03:16.928543Z  INFO cweldrop::net: supervisor shutdown
