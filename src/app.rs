@@ -60,7 +60,11 @@ pub struct App {
     pub selected: usize,
     pub focus: Focus,
     pub input: String,
+    pub input_cursor: usize,
     pub command: String,
+    pub command_cursor: usize,
+    /// Wrapped-line offset from the bottom of the chat. 0 = stick to newest.
+    pub chat_scroll: u16,
     pub status_msg: String,
     pub should_quit: bool,
 }
@@ -76,7 +80,10 @@ impl App {
             selected: 0,
             focus: Focus::Peers,
             input: String::new(),
+            input_cursor: 0,
             command: String::new(),
+            command_cursor: 0,
+            chat_scroll: 0,
             status_msg: String::new(),
             should_quit: false,
         }

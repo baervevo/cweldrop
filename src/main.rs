@@ -125,7 +125,7 @@ async fn run_ui<B: ratatui::backend::Backend>(
     evt_rx: &mut mpsc::Receiver<AppEvent>,
 ) -> Result<()> {
     let mut keys = EventStream::new();
-    term.draw(|f| ui::draw(f, &app))?;
+    term.draw(|f| ui::draw(f, &mut app))?;
 
     loop {
         if app.should_quit {
@@ -161,7 +161,7 @@ async fn run_ui<B: ratatui::backend::Backend>(
             }
             _ = tokio::time::sleep(Duration::from_millis(500)) => {}
         }
-        term.draw(|f| ui::draw(f, &app))?;
+        term.draw(|f| ui::draw(f, &mut app))?;
     }
 }
 

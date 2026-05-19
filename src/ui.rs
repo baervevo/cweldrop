@@ -1,5 +1,5 @@
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::app::{App, Focus, PeerStatus};
 
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -23,6 +23,11 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_peers(f, app, cols[0]);
     draw_right(f, app, cols[1]);
     draw_status(f, app, outer[1]);
+}
+
+fn char_offset(s: &str, byte_cursor: usize) -> u16 {
+    let upto = byte_cursor.min(s.len());
+    s[..upto].chars().count() as u16
 }
 
 fn draw_peers(f: &mut Frame, app: &App, area: Rect) {
@@ -78,7 +83,7 @@ fn input_border_style(app: &App) -> Style {
     }
 }
 
-fn draw_right(f: &mut Frame, app: &App, area: Rect) {
+fn draw_right(f: &mut Frame, app: &mut App, area: Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(3)])
@@ -137,29 +142,65 @@ fn draw_right(f: &mut Frame, app: &App, area: Rect) {
         ),
     };
 
+    let chat_area = rows[0];
+    let chat_block = Block::default().borders(Borders::ALL).title(title);
+    let inner = chat_block.inner(chat_area);
     let chat = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(title))
+        .block(chat_block)
         .wrap(Wrap { trim: false });
-    f.render_widget(chat, rows[0]);
 
-    let (input_title, content) = if app.focus == Focus::Command {
+    // Clamp scroll to the wrapped content height so PageUp can't go past the
+    // first line and PageDown can't pull a blank gap below the newest line.
+    let total = chat.line_count(inner.width) as u16;
+    let visible = inner.height;
+    let max_scroll = total.saturating_sub(visible);
+    if app.chat_scroll > max_scroll {
+        app.chat_scroll = max_scroll;
+    }
+    let scroll_from_top = max_scroll - app.chat_scroll;
+    let chat = chat.scroll((scroll_from_top, 0));
+    f.render_widget(chat, chat_area);
+
+    let input_area = rows[1];
+    let (input_title, content, prefix_len, cursor_chars, is_active) = if app.focus == Focus::Command
+    {
         (
             "command (Enter=run, Esc=cancel)".to_string(),
             format!(":{}", app.command),
+            1u16,
+            char_offset(&app.command, app.command_cursor),
+            true,
         )
     } else {
         (
             "input (Enter=send, : =command, Tab=switch)".to_string(),
             format!("> {}", app.input),
+            2u16,
+            char_offset(&app.input, app.input_cursor),
+            app.focus == Focus::Input,
         )
     };
-    let input = Paragraph::new(content).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(input_title)
-            .border_style(input_border_style(app)),
-    );
-    f.render_widget(input, rows[1]);
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .title(input_title)
+        .border_style(input_border_style(app));
+    let input_inner = input_block.inner(input_area);
+
+    // Horizontal scroll so the cursor stays inside the visible window when the
+    // line is longer than the box.
+    let cursor_col = prefix_len + cursor_chars;
+    let scroll_x = cursor_col.saturating_sub(input_inner.width.saturating_sub(1));
+    let input = Paragraph::new(content)
+        .block(input_block)
+        .scroll((0, scroll_x));
+    f.render_widget(input, input_area);
+
+    if is_active && input_inner.width > 0 && input_inner.height > 0 {
+        let visible_col = cursor_col - scroll_x;
+        let x = input_inner.x + visible_col.min(input_inner.width - 1);
+        let y = input_inner.y;
+        f.set_cursor_position(Position { x, y });
+    }
 }
 
 fn format_hms(t: std::time::SystemTime) -> String {
