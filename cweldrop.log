@@ -1,0 +1,9 @@
+2026-05-19T15:48:37.851290Z  INFO cweldrop: starting cweldrop username=a port=7421
+2026-05-19T15:48:37.851398Z  INFO cweldrop::net::server: listening addr=0.0.0.0:7421 actual_port=7421
+2026-05-19T15:48:37.852049Z  INFO cweldrop::discovery: mdns registered instance_name=a@mariusztop-7421 port=7421
+2026-05-19T15:48:48.373821Z  INFO cweldrop: starting cweldrop username=b port=7422
+2026-05-19T15:48:48.374078Z  INFO cweldrop::net::server: listening addr=0.0.0.0:7422 actual_port=7422
+2026-05-19T15:48:48.376194Z  INFO cweldrop::discovery: mdns registered instance_name=b@mariusztop-7422 port=7422
+2026-05-19T15:48:51.793272Z  INFO cweldrop::net::server: inbound connection addr=192.168.122.1:55846
+2026-05-19T15:49:07.407981Z  INFO cweldrop::net::peer: peer closed addr=172.19.0.1:7421
+2026-05-19T15:49:09.011353Z  INFO cweldrop::net: supervisor shutdown
