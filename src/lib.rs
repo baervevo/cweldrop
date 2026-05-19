@@ -1,6 +1,8 @@
 pub mod app;
 pub mod discovery;
 pub mod event;
+pub mod history_store;
+pub mod identity;
 pub mod input;
 pub mod net;
 pub mod ui;

@@ -23,6 +23,14 @@ pub enum AppEvent {
         username: String,
         resolved_id: Option<PeerId>,
     },
+    /// Fired after the cryptographic handshake completes. `pubkey` is the
+    /// verified hex-encoded ed25519 pubkey of the remote and becomes the
+    /// canonical id under which history is keyed.
+    PeerAuthenticated {
+        id: PeerId,
+        pubkey: PeerId,
+        username: String,
+    },
     PeerDisconnected {
         id: PeerId,
     },

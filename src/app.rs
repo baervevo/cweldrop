@@ -2,7 +2,10 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::SystemTime;
 
+use chrono::{DateTime, Utc};
+
 use crate::event::AppEvent;
+use crate::history_store;
 use crate::net::{NetCmd, PeerId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +24,17 @@ pub struct Peer {
     pub addr: Option<SocketAddr>,
     pub status: PeerStatus,
     pub last_error: Option<String>,
+    /// Verified ed25519 pubkey (hex) of the remote, if the handshake completed.
+    pub pubkey: Option<String>,
+}
+
+impl Peer {
+    /// Key under which chat lines are stored in `App.history` for this peer.
+    /// Verified peers use their pubkey so transcripts survive across nicks and
+    /// connection ids; unverified peers fall back to the connection id.
+    pub fn history_key(&self) -> &str {
+        self.pubkey.as_deref().unwrap_or(&self.id)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -40,8 +54,9 @@ pub enum Focus {
 pub struct App {
     pub self_username: String,
     pub self_port: u16,
+    pub self_pubkey: Option<String>,
     pub peers: Vec<Peer>,
-    pub history: HashMap<PeerId, Vec<ChatLine>>,
+    pub history: HashMap<String, Vec<ChatLine>>,
     pub selected: usize,
     pub focus: Focus,
     pub input: String,
@@ -55,6 +70,7 @@ impl App {
         Self {
             self_username,
             self_port,
+            self_pubkey: None,
             peers: Vec::new(),
             history: HashMap::new(),
             selected: 0,
@@ -64,6 +80,11 @@ impl App {
             status_msg: String::new(),
             should_quit: false,
         }
+    }
+
+    pub fn with_pubkey(mut self, pk: String) -> Self {
+        self.self_pubkey = Some(pk);
+        self
     }
 
     pub fn selected_peer(&self) -> Option<&Peer> {
@@ -94,6 +115,12 @@ impl App {
         self.peers.iter().position(|p| p.id == id)
     }
 
+    fn history_key_for_id(&self, id: &str) -> String {
+        self.peer_index(id)
+            .map(|i| self.peers[i].history_key().to_string())
+            .unwrap_or_else(|| id.to_string())
+    }
+
     /// Returns a NetCmd if the app event implies one. Mostly events are absorbed into state.
     pub fn on_event(&mut self, ev: AppEvent) {
         match ev {
@@ -112,6 +139,7 @@ impl App {
                         addr: Some(addr),
                         status: PeerStatus::Available,
                         last_error: None,
+                        pubkey: None,
                     });
                 }
             }
@@ -140,37 +168,54 @@ impl App {
                         addr: Some(addr),
                         status: PeerStatus::Connecting,
                         last_error: None,
+                        pubkey: None,
                     });
                 }
             }
-            AppEvent::PeerConnected { id, username, resolved_id } => {
-                // If the remote advertised its mdns peer_id and we already have a
-                // discovery-only entry under that id, merge: keep the connected
-                // (current) entry, drop the duplicate.
-                if let Some(other) = resolved_id.as_ref() {
-                    if other != &id {
-                        if let Some(cur_idx) = self.peer_index(&id) {
-                            if let Some(dup_idx) = self.peer_index(other) {
-                                // Preserve any history accumulated under the duplicate.
-                                if let Some(hist) = self.history.remove(other) {
-                                    self.history.entry(id.clone()).or_default().extend(hist);
-                                }
-                                // Inherit a better addr if we have none.
-                                if self.peers[cur_idx].addr.is_none() {
-                                    self.peers[cur_idx].addr = self.peers[dup_idx].addr;
-                                }
-                                self.peers.remove(dup_idx);
-                                if self.selected >= self.peers.len() && !self.peers.is_empty() {
-                                    self.selected = self.peers.len() - 1;
-                                }
-                            }
-                        }
-                    }
-                }
+            AppEvent::PeerConnected { id, username, resolved_id: _ } => {
                 if let Some(idx) = self.peer_index(&id) {
                     self.peers[idx].status = PeerStatus::Online;
                     if !username.is_empty() {
                         self.peers[idx].username = username;
+                    }
+                }
+            }
+            AppEvent::PeerAuthenticated { id, pubkey, username } => {
+                if let Some(idx) = self.peer_index(&id) {
+                    let conn_id = self.peers[idx].id.clone();
+                    self.peers[idx].pubkey = Some(pubkey.clone());
+                    if !username.is_empty() {
+                        self.peers[idx].username = username;
+                    }
+                    self.peers[idx].status = PeerStatus::Online;
+
+                    // Load persisted history once, on first authentication.
+                    if !self.history.contains_key(&pubkey) {
+                        match history_store::load(&pubkey) {
+                            Ok(lines) => {
+                                let loaded: Vec<ChatLine> = lines
+                                    .into_iter()
+                                    .map(|sl| ChatLine {
+                                        from: sl.from,
+                                        body: sl.body,
+                                        at: system_time_from_chrono(sl.at),
+                                    })
+                                    .collect();
+                                self.history.insert(pubkey.clone(), loaded);
+                            }
+                            Err(e) => {
+                                tracing::warn!(error=%e, %pubkey, "history load failed");
+                                self.history.entry(pubkey.clone()).or_default();
+                            }
+                        }
+                    }
+
+                    // Merge any chat that was accumulated under the connection
+                    // id before authentication completed.
+                    if conn_id != pubkey {
+                        if let Some(pre) = self.history.remove(&conn_id) {
+                            self.history.entry(pubkey).or_default().extend(pre);
+                        }
                     }
                 }
             }
@@ -192,7 +237,8 @@ impl App {
                 }
             }
             AppEvent::MessageReceived { id, from, body } => {
-                self.history.entry(id).or_default().push(ChatLine {
+                let key = self.history_key_for_id(&id);
+                self.history.entry(key).or_default().push(ChatLine {
                     from,
                     body,
                     at: SystemTime::now(),
@@ -201,8 +247,11 @@ impl App {
         }
     }
 
+    /// Append a sent message to the in-memory history. Disk persistence is
+    /// the net task's responsibility (peer.rs writes after the wire send).
     pub fn push_self_message(&mut self, peer_id: &str, body: String) {
-        self.history.entry(peer_id.to_string()).or_default().push(ChatLine {
+        let key = self.history_key_for_id(peer_id);
+        self.history.entry(key).or_default().push(ChatLine {
             from: self.self_username.clone(),
             body,
             at: SystemTime::now(),
@@ -256,3 +305,14 @@ impl App {
         }
     }
 }
+
+fn system_time_from_chrono(dt: DateTime<Utc>) -> SystemTime {
+    let secs = dt.timestamp();
+    let nanos = dt.timestamp_subsec_nanos();
+    if secs >= 0 {
+        SystemTime::UNIX_EPOCH + std::time::Duration::new(secs as u64, nanos)
+    } else {
+        SystemTime::UNIX_EPOCH - std::time::Duration::new((-secs) as u64, 0)
+    }
+}
+

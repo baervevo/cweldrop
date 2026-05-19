@@ -1,4 +1,5 @@
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -16,6 +17,7 @@ use tracing::{error, info};
 
 use cweldrop::app::App;
 use cweldrop::event::AppEvent;
+use cweldrop::identity::Identity;
 use cweldrop::net::NetCmd;
 use cweldrop::{discovery, input, net, ui};
 
@@ -54,23 +56,21 @@ async fn main() -> Result<()> {
         .init();
 
     let username = cli.nick.unwrap_or_else(default_nick);
-    info!(%username, port = cli.port, "starting cweldrop");
+    let identity = Arc::new(Identity::load_or_create().context("load identity")?);
+    info!(
+        %username,
+        port = cli.port,
+        pubkey = %identity.pubkey_hex(),
+        "starting cweldrop"
+    );
 
     let (evt_tx, mut evt_rx) = mpsc::channel::<AppEvent>(256);
     let (cmd_tx, cmd_rx) = mpsc::channel::<NetCmd>(256);
 
-    let mdns_enabled = !cli.no_mdns;
-    let username_for_id = username.clone();
     let actual_port = net::run_net(
         cli.port,
         username.clone(),
-        |port| {
-            if mdns_enabled {
-                Some(discovery::self_peer_id(&username_for_id, port))
-            } else {
-                None
-            }
-        },
+        Arc::clone(&identity),
         cmd_rx,
         evt_tx.clone(),
     )
@@ -101,7 +101,7 @@ async fn main() -> Result<()> {
 
     let result = run_ui(
         &mut term,
-        App::new(username, actual_port),
+        App::new(username, actual_port).with_pubkey(identity.pubkey_hex()),
         cmd_tx.clone(),
         &mut evt_rx,
     )

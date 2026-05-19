@@ -83,7 +83,7 @@ fn draw_right(f: &mut Frame, app: &App, area: Rect) {
         Some(p) => {
             let history = app
                 .history
-                .get(&p.id)
+                .get(p.history_key())
                 .map(|h| h.as_slice())
                 .unwrap_or(&[]);
             let lines: Vec<Line> = history

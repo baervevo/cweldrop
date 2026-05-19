@@ -12,6 +12,13 @@ pub enum Message {
         version: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         peer_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pubkey: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nonce: Option<String>,
+    },
+    Auth {
+        signature: String,
     },
     Text {
         body: String,
@@ -25,14 +32,23 @@ impl Message {
             username: username.into(),
             version: PROTOCOL_VERSION.to_string(),
             peer_id: None,
+            pubkey: None,
+            nonce: None,
         }
     }
 
-    pub fn hello_with_id(username: impl Into<String>, peer_id: impl Into<String>) -> Self {
+    pub fn hello_signed(
+        username: impl Into<String>,
+        pubkey_hex: impl Into<String>,
+        nonce_hex: impl Into<String>,
+    ) -> Self {
+        let pk = pubkey_hex.into();
         Self::Hello {
             username: username.into(),
             version: PROTOCOL_VERSION.to_string(),
-            peer_id: Some(peer_id.into()),
+            peer_id: Some(pk.clone()),
+            pubkey: Some(pk),
+            nonce: Some(nonce_hex.into()),
         }
     }
 
@@ -74,6 +90,25 @@ mod tests {
         let s = serde_json::to_string(&m).unwrap();
         assert!(s.contains("\"kind\":\"hello\""));
         assert!(s.contains("\"username\":\"alice\""));
+        let back: Message = serde_json::from_str(&s).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn hello_signed_roundtrip() {
+        let m = Message::hello_signed("alice", "deadbeef", "cafe");
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.contains("\"pubkey\":\"deadbeef\""));
+        assert!(s.contains("\"nonce\":\"cafe\""));
+        let back: Message = serde_json::from_str(&s).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn auth_roundtrip() {
+        let m = Message::Auth { signature: "1234".into() };
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.contains("\"kind\":\"auth\""));
         let back: Message = serde_json::from_str(&s).unwrap();
         assert_eq!(m, back);
     }
