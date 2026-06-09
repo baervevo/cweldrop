@@ -232,6 +232,12 @@ pub async fn run_peer(
                                 body,
                             }).await;
                         }
+                        Message::Typing { active } => {
+                            let _ = evt_tx.send(AppEvent::PeerTyping {
+                                id: id.clone(),
+                                active,
+                            }).await;
+                        }
                         Message::Bye => {
                             info!(%addr, "peer said bye");
                             break;

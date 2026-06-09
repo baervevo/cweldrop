@@ -1,3 +1,4 @@
+use chrono::{DateTime, Local};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
@@ -96,7 +97,7 @@ fn draw_right(f: &mut Frame, app: &mut App, area: Rect) {
                 .get(p.history_key())
                 .map(|h| h.as_slice())
                 .unwrap_or(&[]);
-            let lines: Vec<Line> = history
+            let mut lines: Vec<Line> = history
                 .iter()
                 .map(|cl| {
                     let is_me = cl.from == app.self_username;
@@ -107,7 +108,7 @@ fn draw_right(f: &mut Frame, app: &mut App, area: Rect) {
                     };
                     Line::from(vec![
                         Span::styled(
-                            format!("[{}] ", format_hms(cl.at)),
+                            format!("[{}] ", format_timestamp(cl.at)),
                             Style::default().fg(Color::DarkGray),
                         ),
                         Span::styled(
@@ -118,6 +119,9 @@ fn draw_right(f: &mut Frame, app: &mut App, area: Rect) {
                     ])
                 })
                 .collect();
+            if p.is_typing() {
+                lines.push(typing_line(&p.username));
+            }
             let title = match p.status {
                 PeerStatus::Online => format!("chat with {} [online]", p.username),
                 PeerStatus::Connecting => format!("chat with {} [connecting…]", p.username),
@@ -203,15 +207,33 @@ fn draw_right(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn format_hms(t: std::time::SystemTime) -> String {
-    let secs = t
+/// A dim, italic "<name> is typing…" line with dots that animate across
+/// redraws (the UI ticks at least twice a second).
+fn typing_line(username: &str) -> Line<'static> {
+    let phase = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let h = (secs / 3600) % 24;
-    let m = (secs / 60) % 60;
-    let s = secs % 60;
-    format!("{h:02}:{m:02}:{s:02}")
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+        / 400
+        % 3;
+    let dots = ".".repeat(phase as usize + 1);
+    Line::from(Span::styled(
+        format!("{username} is typing{dots}"),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+    ))
+}
+
+/// Format a message timestamp in the viewer's local timezone. Messages from
+/// today show only the time; older ones are prefixed with the date.
+fn format_timestamp(t: std::time::SystemTime) -> String {
+    let dt: DateTime<Local> = t.into();
+    if dt.date_naive() == Local::now().date_naive() {
+        dt.format("%H:%M:%S").to_string()
+    } else {
+        dt.format("%Y-%m-%d %H:%M:%S").to_string()
+    }
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {

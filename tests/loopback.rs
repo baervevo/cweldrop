@@ -31,9 +31,15 @@ async fn two_supervisors_exchange_text() {
 
     let (a_evt_tx, mut a_evt_rx) = mpsc::channel::<AppEvent>(64);
     let (a_cmd_tx, a_cmd_rx) = mpsc::channel::<NetCmd>(64);
-    let a_port = net::run_net(0, "alice".to_string(), Arc::clone(&a_id), a_cmd_rx, a_evt_tx)
-        .await
-        .expect("start A");
+    let a_port = net::run_net(
+        0,
+        "alice".to_string(),
+        Arc::clone(&a_id),
+        a_cmd_rx,
+        a_evt_tx,
+    )
+    .await
+    .expect("start A");
 
     let (b_evt_tx, mut b_evt_rx) = mpsc::channel::<AppEvent>(64);
     let (b_cmd_tx, b_cmd_rx) = mpsc::channel::<NetCmd>(64);
@@ -64,7 +70,12 @@ async fn two_supervisors_exchange_text() {
     let a_inbound_id = expect_event_extract(
         &mut a_evt_rx,
         |e| {
-            if let AppEvent::PeerAuthenticated { id, pubkey, username } = e {
+            if let AppEvent::PeerAuthenticated {
+                id,
+                pubkey,
+                username,
+            } = e
+            {
                 if pubkey == &b_pubkey && username == "bob" {
                     Some(id.clone())
                 } else {
@@ -109,11 +120,19 @@ async fn bad_signature_rejected() {
     let a_pubkey_hex = a_id.pubkey_hex();
     let (a_evt_tx, mut a_evt_rx) = mpsc::channel::<AppEvent>(64);
     let (a_cmd_tx, a_cmd_rx) = mpsc::channel::<NetCmd>(64);
-    let a_port = net::run_net(0, "alice".to_string(), Arc::clone(&a_id), a_cmd_rx, a_evt_tx)
-        .await
-        .expect("start A");
+    let a_port = net::run_net(
+        0,
+        "alice".to_string(),
+        Arc::clone(&a_id),
+        a_cmd_rx,
+        a_evt_tx,
+    )
+    .await
+    .expect("start A");
 
-    let mut sock = TcpStream::connect(("127.0.0.1", a_port)).await.expect("dial");
+    let mut sock = TcpStream::connect(("127.0.0.1", a_port))
+        .await
+        .expect("dial");
     let (r, mut w) = sock.split();
     let mut r = BufReader::new(r);
 
@@ -128,7 +147,9 @@ async fn bad_signature_rejected() {
     let our_hello = format!(
         "{{\"kind\":\"hello\",\"username\":\"mallory\",\"version\":\"0.0.0\",\"peer_id\":\"{fake_pubkey}\",\"pubkey\":\"{fake_pubkey}\",\"nonce\":\"{nonce}\"}}\n"
     );
-    w.write_all(our_hello.as_bytes()).await.expect("write hello");
+    w.write_all(our_hello.as_bytes())
+        .await
+        .expect("write hello");
 
     // A will send its Auth, drain it.
     let mut auth_line = String::new();
@@ -138,7 +159,9 @@ async fn bad_signature_rejected() {
     // Send a deliberately wrong signature.
     let bad_sig = "ff".repeat(64);
     let our_auth = format!("{{\"kind\":\"auth\",\"signature\":\"{bad_sig}\"}}\n");
-    w.write_all(our_auth.as_bytes()).await.expect("write bad auth");
+    w.write_all(our_auth.as_bytes())
+        .await
+        .expect("write bad auth");
 
     expect_event(
         &mut a_evt_rx,

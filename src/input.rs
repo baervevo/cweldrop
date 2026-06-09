@@ -129,7 +129,7 @@ fn handle_input(app: &mut App, k: KeyEvent) -> Vec<NetCmd> {
         KeyCode::Esc => {
             app.input.clear();
             app.input_cursor = 0;
-            Vec::new()
+            app.typing_stop()
         }
         KeyCode::Char(':') if app.input.is_empty() => {
             app.focus = Focus::Command;
@@ -153,11 +153,11 @@ fn handle_input(app: &mut App, k: KeyEvent) -> Vec<NetCmd> {
         }
         KeyCode::Backspace => {
             delete_before_cursor(&mut app.input, &mut app.input_cursor);
-            Vec::new()
+            typing_feedback(app)
         }
         KeyCode::Delete => {
             delete_at_cursor(&mut app.input, app.input_cursor);
-            Vec::new()
+            typing_feedback(app)
         }
         KeyCode::Enter => {
             let body = std::mem::take(&mut app.input);
@@ -171,7 +171,9 @@ fn handle_input(app: &mut App, k: KeyEvent) -> Vec<NetCmd> {
                 if matches!(p.status, PeerStatus::Online) {
                     let id = p.id.clone();
                     app.push_self_message(&id, body.clone());
-                    return vec![NetCmd::SendText { id, body }];
+                    let mut cmds = app.typing_stop();
+                    cmds.push(NetCmd::SendText { id, body });
+                    return cmds;
                 } else {
                     app.status_msg = format!("peer not connected ({:?})", p.status);
                 }
@@ -182,9 +184,18 @@ fn handle_input(app: &mut App, k: KeyEvent) -> Vec<NetCmd> {
         }
         KeyCode::Char(c) => {
             insert_at_cursor(&mut app.input, &mut app.input_cursor, c);
-            Vec::new()
+            app.typing_ping()
         }
         _ => Vec::new(),
+    }
+}
+
+/// After an edit, ping typing if there's still text, otherwise signal stop.
+fn typing_feedback(app: &mut App) -> Vec<NetCmd> {
+    if app.input.is_empty() {
+        app.typing_stop()
+    } else {
+        app.typing_ping()
     }
 }
 

@@ -23,6 +23,10 @@ pub enum Message {
     Text {
         body: String,
     },
+    /// Transient typing indicator. Not persisted to history.
+    Typing {
+        active: bool,
+    },
     Bye,
 }
 
@@ -113,6 +117,15 @@ mod tests {
     fn text_roundtrip() {
         let m = Message::text("hi there");
         let back: Message = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn typing_roundtrip() {
+        let m = Message::Typing { active: true };
+        let s = serde_json::to_string(&m).unwrap();
+        assert_eq!(s, "{\"kind\":\"typing\",\"active\":true}");
+        let back: Message = serde_json::from_str(&s).unwrap();
         assert_eq!(m, back);
     }
 

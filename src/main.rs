@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use crossterm::event::{Event as CtEvent, EventStream};
+use crossterm::event::{DisableFocusChange, EnableFocusChange, Event as CtEvent, EventStream};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
 
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen).context("enter alt screen")?;
+    execute!(stdout, EnterAlternateScreen, EnableFocusChange).context("enter alt screen")?;
     let backend = CrosstermBackend::new(stdout);
     let mut term = Terminal::new(backend).context("terminal")?;
 
@@ -108,7 +108,7 @@ async fn main() -> Result<()> {
     .await;
 
     let _ = disable_raw_mode();
-    let _ = execute!(term.backend_mut(), LeaveAlternateScreen);
+    let _ = execute!(term.backend_mut(), DisableFocusChange, LeaveAlternateScreen);
     let _ = term.show_cursor();
     let _ = cmd_tx.send(NetCmd::Shutdown).await;
     if let Some(d) = discovery {
@@ -145,6 +145,8 @@ async fn run_ui<B: ratatui::backend::Backend>(
                             }
                         }
                     }
+                    Some(Ok(CtEvent::FocusGained)) => { app.terminal_focused = true; }
+                    Some(Ok(CtEvent::FocusLost)) => { app.terminal_focused = false; }
                     Some(Ok(CtEvent::Resize(_, _))) => {}
                     Some(Ok(_)) => {}
                     Some(Err(e)) => {

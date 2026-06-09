@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Utc};
 
@@ -26,7 +26,14 @@ pub struct Peer {
     pub last_error: Option<String>,
     /// Verified ed25519 pubkey (hex) of the remote, if the handshake completed.
     pub pubkey: Option<String>,
+    /// When the remote last signalled it was typing. Cleared on stop or expiry.
+    pub typing_at: Option<Instant>,
 }
+
+/// How long a "typing…" indicator stays visible after the last ping. The
+/// sender re-pings roughly once a second while editing, so this only lapses
+/// once they actually stop.
+pub const TYPING_TTL: Duration = Duration::from_secs(5);
 
 impl Peer {
     /// Key under which chat lines are stored in `App.history` for this peer.
@@ -34,6 +41,11 @@ impl Peer {
     /// connection ids; unverified peers fall back to the connection id.
     pub fn history_key(&self) -> &str {
         self.pubkey.as_deref().unwrap_or(&self.id)
+    }
+
+    /// True if the peer is currently typing (last ping within `TYPING_TTL`).
+    pub fn is_typing(&self) -> bool {
+        self.typing_at.is_some_and(|t| t.elapsed() < TYPING_TTL)
     }
 }
 
@@ -67,6 +79,11 @@ pub struct App {
     pub chat_scroll: u16,
     pub status_msg: String,
     pub should_quit: bool,
+    /// Whether the terminal window currently has focus (driven by crossterm
+    /// focus events). Used to decide when to fire desktop notifications.
+    pub terminal_focused: bool,
+    /// Throttle: when we last sent a typing ping to the selected peer.
+    last_typing_sent: Option<Instant>,
 }
 
 impl App {
@@ -86,6 +103,8 @@ impl App {
             chat_scroll: 0,
             status_msg: String::new(),
             should_quit: false,
+            terminal_focused: true,
+            last_typing_sent: None,
         }
     }
 
@@ -147,6 +166,7 @@ impl App {
                         status: PeerStatus::Available,
                         last_error: None,
                         pubkey: None,
+                        typing_at: None,
                     });
                 }
             }
@@ -176,6 +196,7 @@ impl App {
                         status: PeerStatus::Connecting,
                         last_error: None,
                         pubkey: None,
+                        typing_at: None,
                     });
                 }
             }
@@ -283,11 +304,29 @@ impl App {
             }
             AppEvent::MessageReceived { id, from, body } => {
                 let key = self.history_key_for_id(&id);
+                // A message ends any pending typing indicator for that peer.
+                if let Some(idx) = self.peer_index(&id) {
+                    self.peers[idx].typing_at = None;
+                }
+                // Notify if the user isn't already looking at this chat, either
+                // because the terminal is unfocused or a different peer is open.
+                let viewing = self.terminal_focused
+                    && self
+                        .selected_peer()
+                        .is_some_and(|p| p.history_key() == key.as_str());
+                if !viewing {
+                    crate::notify::message(&from, &body);
+                }
                 self.history.entry(key).or_default().push(ChatLine {
                     from,
                     body,
                     at: SystemTime::now(),
                 });
+            }
+            AppEvent::PeerTyping { id, active } => {
+                if let Some(idx) = self.peer_index(&id) {
+                    self.peers[idx].typing_at = if active { Some(Instant::now()) } else { None };
+                }
             }
         }
     }
@@ -301,6 +340,39 @@ impl App {
             body,
             at: SystemTime::now(),
         });
+    }
+
+    /// Called while the user edits the input box. Emits a throttled typing
+    /// ping (at most once per second) to the selected peer if it is online.
+    pub fn typing_ping(&mut self) -> Vec<NetCmd> {
+        let now = Instant::now();
+        if let Some(t) = self.last_typing_sent {
+            if now.duration_since(t) < Duration::from_secs(1) {
+                return Vec::new();
+            }
+        }
+        if let Some(p) = self.selected_peer() {
+            if matches!(p.status, PeerStatus::Online) {
+                let id = p.id.clone();
+                self.last_typing_sent = Some(now);
+                return vec![NetCmd::SendTyping { id, active: true }];
+            }
+        }
+        Vec::new()
+    }
+
+    /// Tell the selected peer we have stopped typing (input sent or cleared).
+    pub fn typing_stop(&mut self) -> Vec<NetCmd> {
+        if self.last_typing_sent.take().is_none() {
+            return Vec::new();
+        }
+        if let Some(p) = self.selected_peer() {
+            if matches!(p.status, PeerStatus::Online) {
+                let id = p.id.clone();
+                return vec![NetCmd::SendTyping { id, active: false }];
+            }
+        }
+        Vec::new()
     }
 
     /// Returns NetCmds emitted by handling a command-line entry like `:c 1.2.3.4:7421`.
@@ -457,5 +529,76 @@ mod tests {
             "two connections to the same pubkey must collapse to one row"
         );
         assert_eq!(app.peers[0].id, "second");
+    }
+
+    fn online_peer(app: &mut App, id: &str) {
+        let addr: SocketAddr = "192.0.2.9:7421".parse().unwrap();
+        app.on_event(AppEvent::PeerConnecting {
+            id: id.into(),
+            addr,
+            dialed: true,
+        });
+        app.on_event(AppEvent::PeerAuthenticated {
+            id: id.into(),
+            pubkey: unique_pubkey(),
+            username: "them".into(),
+        });
+    }
+
+    #[test]
+    fn peer_typing_sets_and_clears() {
+        let mut app = App::new("me".into(), 7421);
+        online_peer(&mut app, "p");
+        app.on_event(AppEvent::PeerTyping {
+            id: "p".into(),
+            active: true,
+        });
+        assert!(app.peers[0].is_typing());
+        app.on_event(AppEvent::PeerTyping {
+            id: "p".into(),
+            active: false,
+        });
+        assert!(!app.peers[0].is_typing());
+    }
+
+    #[test]
+    fn message_clears_typing_indicator() {
+        let mut app = App::new("me".into(), 7421);
+        online_peer(&mut app, "p");
+        app.on_event(AppEvent::PeerTyping {
+            id: "p".into(),
+            active: true,
+        });
+        app.on_event(AppEvent::MessageReceived {
+            id: "p".into(),
+            from: "them".into(),
+            body: "hi".into(),
+        });
+        assert!(!app.peers[0].is_typing());
+    }
+
+    #[test]
+    fn typing_ping_only_when_online_and_throttled() {
+        let mut app = App::new("me".into(), 7421);
+        let addr: SocketAddr = "192.0.2.9:7421".parse().unwrap();
+        app.on_event(AppEvent::PeerConnecting {
+            id: "p".into(),
+            addr,
+            dialed: true,
+        });
+        // Connecting, not yet online: no ping.
+        assert!(app.typing_ping().is_empty());
+
+        app.on_event(AppEvent::PeerAuthenticated {
+            id: "p".into(),
+            pubkey: unique_pubkey(),
+            username: "them".into(),
+        });
+        assert_eq!(app.typing_ping().len(), 1, "first ping fires");
+        assert!(app.typing_ping().is_empty(), "throttled within 1s");
+
+        // Stop emits exactly once after a ping was sent.
+        assert_eq!(app.typing_stop().len(), 1);
+        assert!(app.typing_stop().is_empty(), "nothing to stop twice");
     }
 }

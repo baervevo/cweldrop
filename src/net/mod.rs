@@ -22,6 +22,7 @@ pub type PeerId = String;
 pub enum NetCmd {
     Connect { id: PeerId, addr: SocketAddr },
     SendText { id: PeerId, body: String },
+    SendTyping { id: PeerId, active: bool },
     Disconnect { id: PeerId },
     Shutdown,
 }
@@ -106,6 +107,11 @@ impl NetSupervisor {
             NetCmd::SendText { id, body } => {
                 if let Some(h) = self.peers.get(&id) {
                     let _ = h.tx.send(Message::text(body)).await;
+                }
+            }
+            NetCmd::SendTyping { id, active } => {
+                if let Some(h) = self.peers.get(&id) {
+                    let _ = h.tx.send(Message::Typing { active }).await;
                 }
             }
             NetCmd::Disconnect { id } => {

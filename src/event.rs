@@ -43,4 +43,9 @@ pub enum AppEvent {
         from: String,
         body: String,
     },
+    /// Remote peer started (`active=true`) or stopped typing.
+    PeerTyping {
+        id: PeerId,
+        active: bool,
+    },
 }
