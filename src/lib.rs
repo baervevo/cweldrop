@@ -4,6 +4,7 @@ pub mod event;
 pub mod history_store;
 pub mod identity;
 pub mod input;
+pub mod links;
 pub mod net;
 pub mod notify;
 pub mod ui;

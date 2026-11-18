@@ -45,6 +45,7 @@ cweldrop --port 7422 --nick b
 | `Enter` (list) | Connect to selected peer (if not already)      |
 | `Enter` (input)| Send message to selected peer                  |
 | `:`            | Command line                                   |
+| Click link     | Open it in the browser (Shift+drag to select text) |
 | `Ctrl-C`       | Quit                                           |
 
 ### Commands
@@ -54,6 +55,7 @@ cweldrop --port 7422 --nick b
 | `:c <ip:port>` | Manually dial a peer               |
 | `:nick <name>` | Change your username                |
 | `:d`           | Disconnect from selected peer       |
+| `:open [n]`    | Open the newest (or n-th newest) link in this chat |
 | `:q`           | Quit                                |
 
 ## Wire protocol

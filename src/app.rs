@@ -84,6 +84,22 @@ pub struct App {
     pub terminal_focused: bool,
     /// Throttle: when we last sent a typing ping to the selected peer.
     last_typing_sent: Option<Instant>,
+    /// Clickable link cells from the last render (one entry per screen row a
+    /// link occupies). Rebuilt by `ui::draw` every frame.
+    pub link_regions: Vec<LinkRegion>,
+    /// A link the user asked to open; drained and opened by the main loop so
+    /// state handling stays free of side effects.
+    pub pending_open: Option<String>,
+}
+
+/// A horizontal run of screen cells that shows (part of) a link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkRegion {
+    pub y: u16,
+    pub x_start: u16,
+    /// Exclusive.
+    pub x_end: u16,
+    pub url: String,
 }
 
 impl App {
@@ -105,6 +121,8 @@ impl App {
             should_quit: false,
             terminal_focused: true,
             last_typing_sent: None,
+            link_regions: Vec::new(),
+            pending_open: None,
         }
     }
 
@@ -375,6 +393,34 @@ impl App {
         Vec::new()
     }
 
+    /// Handle a left click at screen cell (`x`, `y`): queue the link under it.
+    pub fn click(&mut self, x: u16, y: u16) {
+        let hit = self
+            .link_regions
+            .iter()
+            .find(|r| r.y == y && (r.x_start..r.x_end).contains(&x));
+        if let Some(r) = hit {
+            self.request_open(r.url.clone());
+        }
+    }
+
+    fn request_open(&mut self, url: String) {
+        self.status_msg = format!("opening {url}");
+        self.pending_open = Some(url);
+    }
+
+    /// Links in the selected chat, oldest first.
+    pub fn selected_chat_urls(&self) -> Vec<String> {
+        self.selected_peer()
+            .and_then(|p| self.history.get(p.history_key()))
+            .map(|h| {
+                h.iter()
+                    .flat_map(|cl| crate::links::urls_in(&cl.body))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Returns NetCmds emitted by handling a command-line entry like `:c 1.2.3.4:7421`.
     pub fn run_command(&mut self, line: &str) -> Vec<NetCmd> {
         let line = line.trim();
@@ -414,6 +460,25 @@ impl App {
                 } else {
                     Vec::new()
                 }
+            }
+            "o" | "open" => {
+                // `:open` = newest link in this chat, `:open N` = Nth newest.
+                let n = if arg.is_empty() {
+                    Ok(1)
+                } else {
+                    arg.parse::<usize>()
+                };
+                let urls = self.selected_chat_urls();
+                match n {
+                    Ok(n) if n >= 1 && n <= urls.len() => {
+                        let url = urls[urls.len() - n].clone();
+                        self.request_open(url);
+                    }
+                    Ok(_) if urls.is_empty() => self.status_msg = "no links in this chat".into(),
+                    Ok(_) => self.status_msg = format!("only {} link(s) in this chat", urls.len()),
+                    Err(_) => self.status_msg = format!("bad link number: {arg}"),
+                }
+                Vec::new()
             }
             other => {
                 self.status_msg = format!("unknown command: {other}");
@@ -600,5 +665,54 @@ mod tests {
         // Stop emits exactly once after a ping was sent.
         assert_eq!(app.typing_stop().len(), 1);
         assert!(app.typing_stop().is_empty(), "nothing to stop twice");
+    }
+
+    #[test]
+    fn open_command_picks_nth_newest_link() {
+        let mut app = App::new("me".into(), 7421);
+        online_peer(&mut app, "p");
+        app.push_self_message("p", "old https://a.com and www.b.com".into());
+        app.push_self_message("p", "new http://c.org/x.".into());
+
+        app.run_command("open");
+        assert_eq!(app.pending_open.take().as_deref(), Some("http://c.org/x"));
+        app.run_command("o 2");
+        assert_eq!(
+            app.pending_open.take().as_deref(),
+            Some("https://www.b.com")
+        );
+        app.run_command("open 9");
+        assert_eq!(app.pending_open, None);
+        assert!(app.status_msg.contains("only 3"));
+        app.run_command("open x");
+        assert_eq!(app.pending_open, None);
+    }
+
+    #[test]
+    fn open_command_without_links() {
+        let mut app = App::new("me".into(), 7421);
+        online_peer(&mut app, "p");
+        app.run_command("open");
+        assert_eq!(app.pending_open, None);
+        assert_eq!(app.status_msg, "no links in this chat");
+    }
+
+    #[test]
+    fn click_hits_only_link_cells() {
+        let mut app = App::new("me".into(), 7421);
+        app.link_regions = vec![LinkRegion {
+            y: 3,
+            x_start: 10,
+            x_end: 20,
+            url: "https://a.com".into(),
+        }];
+        app.click(9, 3);
+        app.click(20, 3);
+        app.click(15, 4);
+        assert_eq!(app.pending_open, None);
+        app.click(10, 3);
+        assert_eq!(app.pending_open.take().as_deref(), Some("https://a.com"));
+        app.click(19, 3);
+        assert_eq!(app.pending_open.as_deref(), Some("https://a.com"));
     }
 }

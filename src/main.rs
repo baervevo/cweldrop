@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use crossterm::event::{DisableFocusChange, EnableFocusChange, Event as CtEvent, EventStream};
+use crossterm::event::{
+    DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
+    Event as CtEvent, EventStream, MouseButton, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -19,7 +22,7 @@ use cweldrop::app::App;
 use cweldrop::event::AppEvent;
 use cweldrop::identity::Identity;
 use cweldrop::net::NetCmd;
-use cweldrop::{discovery, input, net, ui};
+use cweldrop::{discovery, input, links, net, ui};
 
 #[derive(Parser, Debug)]
 #[command(version, about = "AirDrop-inspired terminal chat over LAN")]
@@ -95,7 +98,13 @@ async fn main() -> Result<()> {
 
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableFocusChange).context("enter alt screen")?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableFocusChange,
+        EnableMouseCapture
+    )
+    .context("enter alt screen")?;
     let backend = CrosstermBackend::new(stdout);
     let mut term = Terminal::new(backend).context("terminal")?;
 
@@ -108,7 +117,12 @@ async fn main() -> Result<()> {
     .await;
 
     let _ = disable_raw_mode();
-    let _ = execute!(term.backend_mut(), DisableFocusChange, LeaveAlternateScreen);
+    let _ = execute!(
+        term.backend_mut(),
+        DisableMouseCapture,
+        DisableFocusChange,
+        LeaveAlternateScreen
+    );
     let _ = term.show_cursor();
     let _ = cmd_tx.send(NetCmd::Shutdown).await;
     if let Some(d) = discovery {
@@ -145,6 +159,16 @@ async fn run_ui<B: ratatui::backend::Backend>(
                             }
                         }
                     }
+                    Some(Ok(CtEvent::Mouse(m))) => match m.kind {
+                        MouseEventKind::Down(MouseButton::Left) => app.click(m.column, m.row),
+                        MouseEventKind::ScrollUp => {
+                            app.chat_scroll = app.chat_scroll.saturating_add(3);
+                        }
+                        MouseEventKind::ScrollDown => {
+                            app.chat_scroll = app.chat_scroll.saturating_sub(3);
+                        }
+                        _ => {}
+                    },
                     Some(Ok(CtEvent::FocusGained)) => { app.terminal_focused = true; }
                     Some(Ok(CtEvent::FocusLost)) => { app.terminal_focused = false; }
                     Some(Ok(CtEvent::Resize(_, _))) => {}
@@ -162,6 +186,9 @@ async fn run_ui<B: ratatui::backend::Backend>(
                 }
             }
             _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+        }
+        if let Some(url) = app.pending_open.take() {
+            links::open(&url);
         }
         term.draw(|f| ui::draw(f, &mut app))?;
     }
