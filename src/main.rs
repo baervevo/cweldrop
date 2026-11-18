@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
     let discovery = if cli.no_mdns {
         None
     } else {
-        match discovery::Discovery::start(&username, actual_port) {
+        match discovery::Discovery::start(&username, actual_port, &identity.pubkey_hex()) {
             Ok(d) => {
                 if let Err(e) = d.spawn_browser(evt_tx.clone()) {
                     error!(error=%e, "mdns browse failed to start");

@@ -436,6 +436,9 @@ pub async fn run_peer(
     }
 
     reader.abort();
+    // Close our command channel before announcing the disconnect, so anyone
+    // reacting to the event (e.g. redialing this id) sees the handle as dead.
+    drop(out_rx);
     xfer.shutdown().await;
     let _ = evt_tx
         .send(AppEvent::PeerDisconnected { id: id.clone() })

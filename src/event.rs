@@ -10,6 +10,9 @@ pub enum AppEvent {
         id: PeerId,
         username: String,
         addr: SocketAddr,
+        /// Pubkey from the mDNS TXT record. Unverified: only used to match
+        /// the announcement to a known peer row; the handshake proves it.
+        pubkey: Option<String>,
     },
     PeerLost {
         id: PeerId,

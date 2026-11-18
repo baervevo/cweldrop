@@ -559,6 +559,8 @@ mod tests {
             pubkey: None,
             typing_at: None,
             chain: false,
+            claimed_pubkey: None,
+            mdns_id: None,
         });
         app.history.insert(
             "p".into(),

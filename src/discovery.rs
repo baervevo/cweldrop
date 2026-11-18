@@ -17,7 +17,7 @@ pub struct Discovery {
 }
 
 impl Discovery {
-    pub fn start(username: &str, port: u16) -> Result<Self> {
+    pub fn start(username: &str, port: u16, pubkey_hex: &str) -> Result<Self> {
         let daemon = ServiceDaemon::new().context("mdns daemon")?;
         let host = hostname::get()
             .ok()
@@ -27,9 +27,10 @@ impl Discovery {
         let instance_name = format!("{username}@{host}-{port}");
         let host_local = format!("{host}.local.");
 
-        let props: [(&str, &str); 2] = [
+        let props: [(&str, &str); 3] = [
             ("username", username),
             ("version", env!("CARGO_PKG_VERSION")),
+            ("pk", pubkey_hex),
         ];
         // Advertise only routable addresses. Link-local IPv6 (fe80::/10) requires a
         // scope_id that mdns-sd does not propagate to clients, so connect() fails
@@ -78,11 +79,18 @@ impl Discovery {
                             .get_property_val_str("username")
                             .unwrap_or(info.get_fullname())
                             .to_string();
+                        let pubkey = info
+                            .get_property_val_str("pk")
+                            .filter(|pk| {
+                                pk.len() == 64 && pk.bytes().all(|b| b.is_ascii_hexdigit())
+                            })
+                            .map(|pk| pk.to_ascii_lowercase());
                         let id = peer_id_from_instance(info.get_fullname());
                         let _ = evt_tx.blocking_send(AppEvent::PeerDiscovered {
                             id,
                             username,
                             addr: sock,
+                            pubkey,
                         });
                     }
                     ServiceEvent::ServiceRemoved(_, fullname) => {

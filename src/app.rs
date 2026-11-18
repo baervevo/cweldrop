@@ -36,6 +36,11 @@ pub struct Peer {
     /// Speaks the signed message chain; text goes via `crate::chain` and can
     /// be queued while the peer is offline.
     pub chain: bool,
+    /// Pubkey announced over mDNS, not yet proven by a handshake.
+    pub claimed_pubkey: Option<String>,
+    /// mDNS instance id announcing this peer, when the row has another id
+    /// (a connection or contact row that absorbed the discovery).
+    pub mdns_id: Option<PeerId>,
 }
 
 /// How long a "typing…" indicator stays visible after the last ping. The
@@ -273,6 +278,8 @@ impl App {
                 pubkey: Some(pk.clone()),
                 typing_at: None,
                 chain: true,
+                claimed_pubkey: None,
+                mdns_id: None,
             });
             self.rebuild_chain_lines(&pk);
         }
@@ -453,6 +460,15 @@ impl App {
         self.peers.iter().position(|p| p.id == id)
     }
 
+    /// Row for an mDNS instance id: its own row, or one that absorbed it.
+    fn mdns_row(&self, id: &str) -> Option<usize> {
+        self.peer_index(id).or_else(|| {
+            self.peers
+                .iter()
+                .position(|p| p.mdns_id.as_deref() == Some(id))
+        })
+    }
+
     fn history_key_for_id(&self, id: &str) -> String {
         self.peer_index(id)
             .map(|i| self.peers[i].history_key().to_string())
@@ -462,11 +478,33 @@ impl App {
     /// Returns a NetCmd if the app event implies one. Mostly events are absorbed into state.
     pub fn on_event(&mut self, ev: AppEvent) {
         match ev {
-            AppEvent::PeerDiscovered { id, username, addr } => {
-                if let Some(idx) = self.peer_index(&id) {
+            AppEvent::PeerDiscovered {
+                id,
+                username,
+                addr,
+                pubkey,
+            } => {
+                // Same announcement, a row that already absorbed it, or a row
+                // for the same key (contact, earlier connection): reuse it.
+                let existing = self.mdns_row(&id).or_else(|| {
+                    pubkey.as_deref().and_then(|pk| {
+                        self.peers.iter().position(|p| {
+                            p.pubkey.as_deref() == Some(pk)
+                                || p.claimed_pubkey.as_deref() == Some(pk)
+                        })
+                    })
+                });
+                if let Some(idx) = existing {
                     let p = &mut self.peers[idx];
-                    p.username = username;
+                    // A verified row keeps its name; TXT records are unsigned.
+                    if p.pubkey.is_none() {
+                        p.username = username;
+                        p.claimed_pubkey = pubkey;
+                    }
                     p.addr = Some(addr);
+                    if p.id != id {
+                        p.mdns_id = Some(id);
+                    }
                     if matches!(p.status, PeerStatus::Offline | PeerStatus::Error) {
                         p.status = PeerStatus::Available;
                     }
@@ -480,11 +518,13 @@ impl App {
                         pubkey: None,
                         typing_at: None,
                         chain: false,
+                        claimed_pubkey: pubkey,
+                        mdns_id: None,
                     });
                 }
             }
             AppEvent::PeerLost { id } => {
-                if let Some(idx) = self.peer_index(&id) {
+                if let Some(idx) = self.mdns_row(&id) {
                     // Only mark offline if not currently connected.
                     let p = &mut self.peers[idx];
                     if matches!(p.status, PeerStatus::Available) {
@@ -511,6 +551,8 @@ impl App {
                         pubkey: None,
                         typing_at: None,
                         chain: false,
+                        claimed_pubkey: None,
+                        mdns_id: None,
                     });
                 }
             }
@@ -559,25 +601,55 @@ impl App {
                     // the same address IP (an mDNS discovery shadow of this
                     // freshly authenticated connection).
                     let auth_id = self.peers[idx].id.clone();
+                    let selected_id = self.selected_peer().map(|p| p.id.clone());
                     let dup_ids: Vec<String> = self
                         .peers
                         .iter()
                         .filter(|p| p.id != auth_id)
                         .filter(|p| {
                             p.pubkey.as_deref() == Some(pubkey.as_str())
+                                || p.claimed_pubkey.as_deref() == Some(pubkey.as_str())
+                                // Old peers announce no key: fall back to IP.
                                 || (p.pubkey.is_none()
+                                    && p.claimed_pubkey.is_none()
                                     && auth_ip.is_some()
                                     && p.addr.map(|a| a.ip()) == auth_ip)
                         })
                         .map(|p| p.id.clone())
                         .collect();
-                    for did in dup_ids {
-                        if let Some(pre) = self.history.remove(&did) {
+                    for did in &dup_ids {
+                        if let Some(pre) = self.history.remove(did) {
                             self.history.entry(pubkey.clone()).or_default().extend(pre);
                         }
-                        if let Some(pos) = self.peer_index(&did) {
-                            self.peers.remove(pos);
+                        let Some(pos) = self.peer_index(did) else {
+                            continue;
+                        };
+                        let gone = self.peers.remove(pos);
+                        // Keep the mDNS link and the peer's listening address,
+                        // so the row can be redialed and matched again after a
+                        // disconnect (an inbound row only knows an ephemeral
+                        // source port).
+                        let mdns = gone
+                            .mdns_id
+                            .clone()
+                            .or_else(|| gone.id.starts_with("mdns:").then(|| gone.id.clone()));
+                        if let Some(a) = self.peer_index(&auth_id) {
+                            let auth = &mut self.peers[a];
+                            if mdns.is_some() && auth.mdns_id.is_none() {
+                                auth.mdns_id = mdns;
+                                if auth.id.starts_with("inbound:") && gone.addr.is_some() {
+                                    auth.addr = gone.addr;
+                                }
+                            }
                         }
+                    }
+                    // Keep the user's selection on the same peer.
+                    let keep = match selected_id {
+                        Some(s) if dup_ids.contains(&s) => Some(auth_id.clone()),
+                        other => other,
+                    };
+                    if let Some(i) = keep.and_then(|k| self.peer_index(&k)) {
+                        self.selected = i;
                     }
                     if self.selected >= self.peers.len() {
                         self.selected = self.peers.len().saturating_sub(1);
@@ -1223,6 +1295,7 @@ mod tests {
             id: mdns_id.clone(),
             username: "alice".into(),
             addr: listen_addr,
+            pubkey: None,
         });
         assert_eq!(app.peers.len(), 1, "discovery creates one row");
 
@@ -1669,6 +1742,125 @@ mod tests {
         let line = app.history[&them.pubkey_hex()].last().unwrap().body.clone();
         let code = chain::safety_code(&them.pubkey_bytes(), &me.pubkey_bytes());
         assert!(line.contains(&code), "{line} should contain {code}");
+    }
+
+    fn discover(app: &mut App, id: &str, addr: &str, pk: Option<&str>) {
+        app.on_event(AppEvent::PeerDiscovered {
+            id: id.into(),
+            username: "alice".into(),
+            addr: addr.parse().unwrap(),
+            pubkey: pk.map(String::from),
+        });
+    }
+
+    fn inbound_auth(app: &mut App, id: &str, src: &str, pk: &str) {
+        app.on_event(AppEvent::PeerConnecting {
+            id: id.into(),
+            addr: src.parse().unwrap(),
+            dialed: false,
+        });
+        app.on_event(AppEvent::PeerAuthenticated {
+            id: id.into(),
+            pubkey: pk.into(),
+            username: "alice".into(),
+        });
+    }
+
+    /// Issue #7: offline -> online -> offline -> online must not leave two
+    /// "alice" rows behind.
+    #[test]
+    fn reconnect_cycles_keep_one_row() {
+        let mut app = App::new("me".into(), 7421);
+        let pk = unique_pubkey();
+        let mdns = "mdns:alice@host-7421._cweldrop._tcp.local.";
+        for round in 0..3 {
+            discover(&mut app, mdns, "192.0.2.7:7421", Some(&pk));
+            assert_eq!(app.peers.len(), 1, "round {round}: discovery");
+            let inbound = format!("inbound:192.0.2.7:{}", 40000 + round);
+            inbound_auth(
+                &mut app,
+                &inbound,
+                &format!("192.0.2.7:{}", 40000 + round),
+                &pk,
+            );
+            assert_eq!(app.peers.len(), 1, "round {round}: connected");
+            assert_eq!(app.peers[0].status, PeerStatus::Online);
+            app.on_event(AppEvent::PeerDisconnected {
+                id: inbound.clone(),
+            });
+            // The row is dialable at the listening port, not the source port.
+            assert_eq!(app.peers[0].status, PeerStatus::Available);
+            assert_eq!(app.peers[0].addr, Some("192.0.2.7:7421".parse().unwrap()));
+            app.on_event(AppEvent::PeerLost { id: mdns.into() });
+            assert_eq!(app.peers.len(), 1, "round {round}: offline");
+            assert_eq!(app.peers[0].status, PeerStatus::Offline);
+        }
+    }
+
+    /// The announcement and the connection come from different addresses
+    /// (IPv6 vs IPv4): the key still ties them together.
+    #[test]
+    fn same_key_different_ip_merges() {
+        let mut app = App::new("me".into(), 7421);
+        let pk = unique_pubkey();
+        discover(&mut app, "mdns:a", "[2001:db8::7]:7421", Some(&pk));
+        inbound_auth(&mut app, "inbound:192.0.2.7:4000", "192.0.2.7:4000", &pk);
+        assert_eq!(app.peers.len(), 1);
+        // And a late announcement for the connected key attaches too.
+        discover(&mut app, "mdns:b", "192.0.2.8:7421", Some(&pk));
+        assert_eq!(app.peers.len(), 1);
+        assert_eq!(app.peers[0].status, PeerStatus::Online);
+    }
+
+    #[test]
+    fn two_users_on_one_host_stay_separate() {
+        let mut app = App::new("me".into(), 7421);
+        let (pk_a, pk_b) = (unique_pubkey(), unique_pubkey());
+        discover(&mut app, "mdns:a", "192.0.2.7:7421", Some(&pk_a));
+        discover(&mut app, "mdns:b", "192.0.2.7:7422", Some(&pk_b));
+        inbound_auth(&mut app, "inbound:192.0.2.7:4000", "192.0.2.7:4000", &pk_a);
+        assert_eq!(app.peers.len(), 2, "b's row isn't swallowed by IP match");
+        assert!(app
+            .peers
+            .iter()
+            .any(|p| p.claimed_pubkey.as_deref() == Some(pk_b.as_str())));
+    }
+
+    #[test]
+    fn discovery_attaches_to_offline_contact() {
+        let (me, them) = (test_identity(), test_identity());
+        let chains = test_chains(&me);
+        chains.compose(&them.pubkey_hex(), "queued").unwrap();
+        let mut app = App::new("me".into(), 7421).with_chains(chains);
+        assert_eq!(app.peers.len(), 1);
+        discover(
+            &mut app,
+            "mdns:x",
+            "192.0.2.7:7421",
+            Some(&them.pubkey_hex()),
+        );
+        assert_eq!(app.peers.len(), 1, "no second row for a known contact");
+        assert_eq!(app.peers[0].status, PeerStatus::Available);
+        assert!(app.peers[0].addr.is_some(), "contact becomes dialable");
+    }
+
+    #[test]
+    fn selection_follows_merged_row() {
+        let mut app = App::new("me".into(), 7421);
+        let pk = unique_pubkey();
+        discover(
+            &mut app,
+            "mdns:other",
+            "192.0.2.9:7421",
+            Some(&unique_pubkey()),
+        );
+        discover(&mut app, "mdns:a", "192.0.2.7:7421", Some(&pk));
+        app.selected = 1;
+        inbound_auth(&mut app, "inbound:192.0.2.7:4000", "192.0.2.7:4000", &pk);
+        assert_eq!(
+            app.selected_peer().unwrap().pubkey.as_deref(),
+            Some(pk.as_str())
+        );
     }
 
     #[test]
