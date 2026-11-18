@@ -57,8 +57,9 @@ cweldrop --port 7422 --nick b
 | `:d`           | Disconnect from selected peer       |
 | `:open [n]`    | Open the newest (or n-th newest) link in this chat |
 | `:send <path>` | Offer a file to the selected peer   |
-| `:accept [n]` / `:reject [n]` | Answer the newest (or n-th newest) incoming file offer |
-| `:view [n]`    | Open the newest (or n-th newest) file in this chat (also: click its name): images in the graphics viewer, text with [bat](https://github.com/sharkdp/bat) highlighting (plain text without bat) |
+| `:accept [n\|name\|all]` / `:reject …` | Answer a file offer; with several pending and no argument, opens `:files` |
+| `:files`       | Pick from all files in this chat: Enter accept/open, `a`/`r` accept/reject, `A`/`R` all pending |
+| `:view [n\|name]` | Open a file in this chat (also: click its name): images in the graphics viewer, text with [bat](https://github.com/sharkdp/bat) highlighting (plain text without bat) |
 | `:settings`    | Settings panel: incoming file policy (ask / auto-accept / reject), size cap, download folder |
 | `:verify`      | Show the safety code for this chat; if your peer sees the same code, you hold each other's real keys |
 | `:verify confirm` / `:verify forget` | Mark this contact's key as verified (✔), or undo it |

@@ -43,6 +43,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.focus == Focus::Settings {
         draw_settings(f, app, area);
     }
+    if app.focus == Focus::Files {
+        draw_files(f, app, area);
+    }
     if app.viewer.is_some() {
         draw_viewer(f, app, outer[0]);
     }
@@ -514,6 +517,53 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
+fn draw_files(f: &mut Frame, app: &App, area: Rect) {
+    let list = app.chat_files();
+    let rows = list.len().min(14) as u16;
+    let popup = centered(area, 90, rows + 4);
+    f.render_widget(Clear, popup);
+    let dim = Style::default().fg(Color::DarkGray);
+    let sel = app.files_sel.min(list.len().saturating_sub(1));
+    // Keep the highlighted row on screen.
+    let first = sel.saturating_sub(rows.saturating_sub(1) as usize);
+    let mut lines: Vec<Line> = list
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(rows as usize)
+        .map(|(i, file)| {
+            let (badge, color) = match &file.state {
+                FileState::AwaitingDecision => ("pending ", Color::Yellow),
+                FileState::Offered => ("offered ", Color::DarkGray),
+                FileState::Transferring(_) => ("moving  ", Color::Yellow),
+                FileState::Done => ("ready   ", Color::Green),
+                FileState::Rejected => ("declined", Color::DarkGray),
+                FileState::Failed(_) => ("failed  ", Color::Red),
+            };
+            let mut style = Style::default();
+            if i == sel {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            Line::from(vec![
+                Span::styled(format!(" {:>2}. ", i + 1), style),
+                Span::styled(format!("{badge} "), style.fg(color)),
+                Span::styled(file.name.clone(), style.add_modifier(Modifier::BOLD)),
+                Span::styled(format!("  {} ", files::human_size(file.size)), style),
+            ])
+        })
+        .collect();
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "↑/↓ select · Enter accept/open · a accept · r reject · A/R all pending · Esc close",
+        dim,
+    )));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("files in this chat (newest first)")
+        .border_style(Style::default().fg(Color::Magenta));
+    f.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
 fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
     let Some(v) = app.viewer.as_mut() else { return };
     f.render_widget(Clear, area);
@@ -793,6 +843,20 @@ mod tests {
         app.selected = 1;
         let text = screen_text(&mut app, 120, 12);
         assert!(text.contains("⚠ not the alice you know"), "{text}");
+    }
+
+    #[test]
+    fn files_panel_lists_newest_first_with_selection() {
+        let mut app = app_with_messages(&[]);
+        let h = app.history.get_mut("p").unwrap();
+        h.push(file_line("old.txt", FileState::Done));
+        h.push(file_line("new.png", FileState::AwaitingDecision));
+        app.focus = Focus::Files;
+        let text = screen_text(&mut app, 120, 20);
+        let new = text.find("1. pending  new.png").expect(&text);
+        let old = text.find("2. ready    old.txt").expect(&text);
+        assert!(new < old, "{text}");
+        assert!(text.contains("files in this chat"), "{text}");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{App, Focus, PeerStatus, SETTINGS_ROWS};
+use crate::app::{App, FilesAction, Focus, PeerStatus, SETTINGS_ROWS};
 use crate::net::NetCmd;
 
 /// Handle a keypress; return any NetCmds to emit.
@@ -27,7 +27,7 @@ pub fn handle_key(app: &mut App, k: KeyEvent) -> Vec<NetCmd> {
     }
 
     // Scrollback (works in any non-Command focus).
-    if !matches!(app.focus, Focus::Command | Focus::Settings) {
+    if !matches!(app.focus, Focus::Command | Focus::Settings | Focus::Files) {
         match k.code {
             KeyCode::PageUp => {
                 app.chat_scroll = app.chat_scroll.saturating_add(5);
@@ -48,6 +48,20 @@ pub fn handle_key(app: &mut App, k: KeyEvent) -> Vec<NetCmd> {
         Focus::Settings => {
             handle_settings(app, k);
             Vec::new()
+        }
+        Focus::Files => {
+            let action = match k.code {
+                KeyCode::Up | KeyCode::Char('k') => FilesAction::Up,
+                KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => FilesAction::Down,
+                KeyCode::Enter => FilesAction::Open,
+                KeyCode::Char('a') => FilesAction::Accept,
+                KeyCode::Char('r') | KeyCode::Char('d') => FilesAction::Reject,
+                KeyCode::Char('A') => FilesAction::AcceptAll,
+                KeyCode::Char('R') => FilesAction::RejectAll,
+                KeyCode::Esc | KeyCode::Char('q') => FilesAction::Close,
+                _ => return Vec::new(),
+            };
+            app.files_action(action)
         }
     }
 }

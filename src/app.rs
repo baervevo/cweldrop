@@ -164,6 +164,73 @@ pub enum Focus {
     Input,
     Command,
     Settings,
+    /// The `:files` panel.
+    Files,
+}
+
+/// Keys of the `:files` panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilesAction {
+    Up,
+    Down,
+    /// Accept a pending offer, or view a finished file.
+    Open,
+    Accept,
+    Reject,
+    AcceptAll,
+    RejectAll,
+    Close,
+}
+
+/// Which of several candidates a command argument means.
+#[derive(Debug, PartialEq, Eq)]
+enum Pick {
+    One(usize),
+    All,
+    /// No argument and more than one candidate.
+    Ambiguous,
+    Nothing,
+}
+
+/// Resolve `arg` against `items` (newest first): empty = the only one,
+/// `all`, `n` = n-th newest, otherwise an exact or unique partial file name.
+fn pick(items: &[FileInfo], arg: &str) -> Pick {
+    let arg = arg.trim();
+    if items.is_empty() {
+        return Pick::Nothing;
+    }
+    if arg.is_empty() {
+        return if items.len() == 1 {
+            Pick::One(0)
+        } else {
+            Pick::Ambiguous
+        };
+    }
+    if arg.eq_ignore_ascii_case("all") {
+        return Pick::All;
+    }
+    if let Ok(n) = arg.parse::<usize>() {
+        return if (1..=items.len()).contains(&n) {
+            Pick::One(n - 1)
+        } else {
+            Pick::Nothing
+        };
+    }
+    if let Some(i) = items.iter().position(|f| f.name.eq_ignore_ascii_case(arg)) {
+        return Pick::One(i);
+    }
+    let needle = arg.to_lowercase();
+    let hits: Vec<usize> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.name.to_lowercase().contains(&needle))
+        .map(|(i, _)| i)
+        .collect();
+    match hits[..] {
+        [i] => Pick::One(i),
+        [] => Pick::Nothing,
+        _ => Pick::Ambiguous,
+    }
 }
 
 /// Rows of the settings panel, in display order.
@@ -215,6 +282,8 @@ pub struct App {
     pub settings_sel: usize,
     /// In-progress edit of the download folder, if any.
     pub settings_edit: Option<String>,
+    /// Highlighted row in the `:files` panel.
+    pub files_sel: usize,
     /// NetCmds produced while handling events; drained by the main loop.
     pub outbox: Vec<NetCmd>,
     pub viewer: Option<Viewer>,
@@ -269,6 +338,7 @@ impl App {
             persist_settings: false,
             settings_sel: 0,
             settings_edit: None,
+            files_sel: 0,
             outbox: Vec::new(),
             viewer: None,
             pending_view: None,
@@ -955,51 +1025,153 @@ impl App {
     }
 
     /// Pending incoming offers in the selected chat, oldest first.
-    fn pending_offers(&self) -> Vec<String> {
+    /// File lines in the selected chat, newest first (the `:files` panel).
+    pub fn chat_files(&self) -> Vec<FileInfo> {
         self.selected_chat()
             .iter()
-            .filter_map(|cl| cl.file.as_ref())
-            .filter(|f| f.state == FileState::AwaitingDecision)
-            .map(|f| f.file_id.clone())
+            .rev()
+            .filter_map(|cl| cl.file.clone())
             .collect()
     }
 
-    /// Answer the `n`-th newest pending offer (1 = newest) in this chat.
-    fn decide_offer(&mut self, arg: &str, accept: bool) -> Vec<NetCmd> {
-        let offers = self.pending_offers();
-        let n = if arg.is_empty() {
-            Ok(1)
-        } else {
-            arg.parse::<usize>()
-        };
-        let file_id = match n {
-            Ok(n) if n >= 1 && n <= offers.len() => offers[offers.len() - n].clone(),
-            Ok(_) if offers.is_empty() => {
-                self.status_msg = "no pending file offers in this chat".into();
-                return Vec::new();
-            }
-            Ok(_) => {
-                self.status_msg = format!("only {} pending offer(s)", offers.len());
-                return Vec::new();
-            }
-            Err(_) => {
-                self.status_msg = format!("bad offer number: {arg}");
-                return Vec::new();
-            }
-        };
+    /// Accept or reject the given pending offers.
+    fn answer_offers(&mut self, file_ids: Vec<String>, accept: bool) -> Vec<NetCmd> {
         let Some(id) = self.selected_peer().map(|p| p.id.clone()) else {
             return Vec::new();
         };
-        if accept {
-            self.set_file_state(&file_id, FileState::Transferring(0));
-            let dir = self.settings.download_dir.clone();
-            self.status_msg = format!("receiving into {}", dir.display());
-            vec![NetCmd::AcceptFile { id, file_id, dir }]
-        } else {
-            self.set_file_state(&file_id, FileState::Rejected);
-            self.status_msg = "file declined".into();
-            vec![NetCmd::RejectFile { id, file_id }]
+        let n = file_ids.len();
+        let dir = self.settings.download_dir.clone();
+        let cmds = file_ids
+            .into_iter()
+            .map(|file_id| {
+                if accept {
+                    self.set_file_state(&file_id, FileState::Transferring(0));
+                    NetCmd::AcceptFile {
+                        id: id.clone(),
+                        file_id,
+                        dir: dir.clone(),
+                    }
+                } else {
+                    self.set_file_state(&file_id, FileState::Rejected);
+                    NetCmd::RejectFile {
+                        id: id.clone(),
+                        file_id,
+                    }
+                }
+            })
+            .collect();
+        self.status_msg = match (accept, n) {
+            (true, 1) => format!("receiving into {}", dir.display()),
+            (true, n) => format!("receiving {n} files into {}", dir.display()),
+            (false, 1) => "file declined".into(),
+            (false, n) => format!("{n} files declined"),
+        };
+        cmds
+    }
+
+    /// Open the `:files` panel with a hint in the status line.
+    fn open_files_panel(&mut self, hint: String) {
+        self.focus = Focus::Files;
+        self.files_sel = 0;
+        self.status_msg = hint;
+    }
+
+    /// `:accept` / `:reject` with an optional number, name or `all`.
+    fn decide_offer(&mut self, arg: &str, accept: bool) -> Vec<NetCmd> {
+        let offers: Vec<FileInfo> = self
+            .chat_files()
+            .into_iter()
+            .filter(|f| f.state == FileState::AwaitingDecision)
+            .collect();
+        let verb = if accept { "accept" } else { "reject" };
+        match pick(&offers, arg) {
+            Pick::One(i) => self.answer_offers(vec![offers[i].file_id.clone()], accept),
+            Pick::All => {
+                let ids = offers.into_iter().map(|f| f.file_id).collect();
+                self.answer_offers(ids, accept)
+            }
+            Pick::Ambiguous => {
+                self.open_files_panel(format!(
+                    "{} pending offers: pick one (a accept · r reject · A/R all)",
+                    offers.len()
+                ));
+                Vec::new()
+            }
+            Pick::Nothing if offers.is_empty() => {
+                self.status_msg = "no pending file offers in this chat".into();
+                Vec::new()
+            }
+            Pick::Nothing => {
+                self.status_msg =
+                    format!("no offer matches {arg:?} — try :{verb} with no argument");
+                Vec::new()
+            }
         }
+    }
+
+    /// `:view` with an optional number or name.
+    fn view_file(&mut self, arg: &str) {
+        let done: Vec<FileInfo> = self
+            .chat_files()
+            .into_iter()
+            .filter(|f| f.state == FileState::Done && f.path.is_some())
+            .collect();
+        match pick(&done, arg) {
+            Pick::One(i) => {
+                let path = done[i].path.clone().expect("filtered");
+                self.open_viewer(path);
+            }
+            Pick::Ambiguous | Pick::All => {
+                self.open_files_panel(format!("{} files: pick one to open", done.len()))
+            }
+            Pick::Nothing if done.is_empty() => self.status_msg = "no files in this chat".into(),
+            Pick::Nothing => self.status_msg = format!("no file matches {arg:?}"),
+        }
+    }
+
+    /// A key pressed in the `:files` panel.
+    pub fn files_action(&mut self, action: FilesAction) -> Vec<NetCmd> {
+        let list = self.chat_files();
+        if list.is_empty() {
+            self.focus = Focus::Input;
+            return Vec::new();
+        }
+        self.files_sel = self.files_sel.min(list.len() - 1);
+        let cur = list[self.files_sel].clone();
+        let pending: Vec<String> = list
+            .iter()
+            .filter(|f| f.state == FileState::AwaitingDecision)
+            .map(|f| f.file_id.clone())
+            .collect();
+        match action {
+            FilesAction::Up => self.files_sel = self.files_sel.saturating_sub(1),
+            FilesAction::Down => self.files_sel = (self.files_sel + 1).min(list.len() - 1),
+            FilesAction::Close => self.focus = Focus::Input,
+            FilesAction::Open => match (&cur.state, &cur.path) {
+                (FileState::AwaitingDecision, _) => {
+                    return self.answer_offers(vec![cur.file_id], true)
+                }
+                (FileState::Done, Some(p)) => {
+                    let p = p.clone();
+                    self.focus = Focus::Input;
+                    self.open_viewer(p);
+                }
+                _ => self.status_msg = format!("{} can't be opened yet", cur.name),
+            },
+            FilesAction::Accept | FilesAction::Reject
+                if cur.state != FileState::AwaitingDecision =>
+            {
+                self.status_msg = format!("{} isn't waiting for an answer", cur.name);
+            }
+            FilesAction::Accept => return self.answer_offers(vec![cur.file_id], true),
+            FilesAction::Reject => return self.answer_offers(vec![cur.file_id], false),
+            FilesAction::AcceptAll | FilesAction::RejectAll if pending.is_empty() => {
+                self.status_msg = "no pending offers".into();
+            }
+            FilesAction::AcceptAll => return self.answer_offers(pending, true),
+            FilesAction::RejectAll => return self.answer_offers(pending, false),
+        }
+        Vec::new()
     }
 
     /// `:send <path>`: offer a local file to the selected peer.
@@ -1232,19 +1404,14 @@ impl App {
             "accept" | "a" => self.decide_offer(arg, true),
             "reject" => self.decide_offer(arg, false),
             "view" | "v" => {
-                let imgs = self.selected_chat_files();
-                let n = if arg.is_empty() {
-                    Ok(1)
+                self.view_file(arg);
+                Vec::new()
+            }
+            "files" => {
+                if self.chat_files().is_empty() {
+                    self.status_msg = "no files in this chat".into();
                 } else {
-                    arg.parse::<usize>()
-                };
-                match n {
-                    Ok(n) if n >= 1 && n <= imgs.len() => {
-                        let path = imgs[imgs.len() - n].1.clone();
-                        self.open_viewer(path);
-                    }
-                    _ if imgs.is_empty() => self.status_msg = "no files in this chat".into(),
-                    _ => self.status_msg = format!("pick 1..{}", imgs.len()),
+                    self.open_files_panel(String::new());
                 }
                 Vec::new()
             }
@@ -2038,6 +2205,105 @@ mod tests {
         assert!(!app.peers[0].verified && !chains.is_verified(&them.pubkey_hex()));
         app.run_command("verify bogus");
         assert!(app.status_msg.contains("usage"));
+    }
+
+    fn offer_named(app: &mut App, file_id: &str, name: &str) {
+        app.on_event(AppEvent::FileOffered {
+            id: "p".into(),
+            file_id: file_id.into(),
+            name: name.into(),
+            size: 10,
+        });
+    }
+
+    /// Issue #11: with several offers, a bare :accept asks which one.
+    #[test]
+    fn several_offers_open_the_files_panel() {
+        let mut app = App::new("me".into(), 7421);
+        online_peer(&mut app, "p");
+        offer_named(&mut app, "f1", "report.pdf");
+        offer_named(&mut app, "f2", "cat.png");
+        offer_named(&mut app, "f3", "notes.txt");
+        app.focus = Focus::Command;
+        assert!(app.run_command("accept").is_empty());
+        assert_eq!(app.focus, Focus::Files, "ambiguous: let the user pick");
+        assert!(app.status_msg.contains("3 pending offers"));
+
+        // Newest first: notes.txt, cat.png, report.pdf. Move to cat.png.
+        app.files_action(FilesAction::Down);
+        let cmds = app.files_action(FilesAction::Reject);
+        assert!(matches!(&cmds[..], [NetCmd::RejectFile { file_id, .. }] if file_id == "f2"));
+        let cmds = app.files_action(FilesAction::Open); // still on cat.png: declined
+        assert!(cmds.is_empty());
+        let cmds = app.files_action(FilesAction::AcceptAll);
+        assert_eq!(cmds.len(), 2, "remaining two pending offers");
+        assert_eq!(state_of(&app, "f1"), FileState::Transferring(0));
+        assert_eq!(state_of(&app, "f2"), FileState::Rejected);
+        assert_eq!(state_of(&app, "f3"), FileState::Transferring(0));
+        app.files_action(FilesAction::Close);
+        assert_eq!(app.focus, Focus::Input);
+    }
+
+    #[test]
+    fn accept_and_reject_by_name_number_or_all() {
+        let mut app = App::new("me".into(), 7421);
+        online_peer(&mut app, "p");
+        offer_named(&mut app, "f1", "report.pdf");
+        offer_named(&mut app, "f2", "cat.png");
+        offer_named(&mut app, "f3", "cat-2.png");
+        let cmds = app.run_command("accept report");
+        assert!(matches!(&cmds[..], [NetCmd::AcceptFile { file_id, .. }] if file_id == "f1"));
+        let cmds = app.run_command("accept CAT.PNG");
+        assert!(matches!(&cmds[..], [NetCmd::AcceptFile { file_id, .. }] if file_id == "f2"));
+        assert!(app.run_command("reject nope").is_empty());
+        assert!(app.status_msg.contains("no offer matches"));
+        assert_eq!(app.run_command("reject all").len(), 1);
+        assert_eq!(state_of(&app, "f3"), FileState::Rejected);
+    }
+
+    #[test]
+    fn view_by_name_and_panel_opens_files() {
+        let mut app = App::new("me".into(), 7421);
+        online_peer(&mut app, "p");
+        for (id, name) in [("f1", "a.txt"), ("f2", "b.png")] {
+            offer_named(&mut app, id, name);
+            app.on_event(AppEvent::FileReceived {
+                id: "p".into(),
+                file_id: id.into(),
+                path: format!("/tmp/{name}").into(),
+            });
+        }
+        app.run_command("view");
+        assert_eq!(app.focus, Focus::Files, "two files: pick");
+        assert!(app.viewer.is_none());
+        app.files_action(FilesAction::Down); // a.txt (older)
+        app.files_action(FilesAction::Open);
+        assert_eq!(app.pending_view.take(), Some("/tmp/a.txt".into()));
+        assert_eq!(app.focus, Focus::Input);
+        app.close_viewer();
+        app.run_command("view b.png");
+        assert_eq!(app.pending_view.take(), Some("/tmp/b.png".into()));
+    }
+
+    #[test]
+    fn pick_resolution() {
+        let f = |name: &str| FileInfo {
+            file_id: String::new(),
+            name: name.into(),
+            size: 1,
+            path: None,
+            state: FileState::Done,
+        };
+        let items = vec![f("notes.txt"), f("cat.png"), f("cat-2.png")];
+        assert_eq!(pick(&items, ""), Pick::Ambiguous);
+        assert_eq!(pick(&items[..1], ""), Pick::One(0));
+        assert_eq!(pick(&items, "2"), Pick::One(1));
+        assert_eq!(pick(&items, "9"), Pick::Nothing);
+        assert_eq!(pick(&items, "cat.png"), Pick::One(1), "exact beats partial");
+        assert_eq!(pick(&items, "cat"), Pick::Ambiguous);
+        assert_eq!(pick(&items, "notes"), Pick::One(0));
+        assert_eq!(pick(&items, "ALL"), Pick::All);
+        assert_eq!(pick(&[], ""), Pick::Nothing);
     }
 
     #[test]
