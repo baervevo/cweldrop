@@ -16,6 +16,9 @@ pub enum Message {
         pubkey: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         nonce: Option<String>,
+        /// Optional protocol features, e.g. `chain1`. Old peers ignore it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        caps: Vec<String>,
     },
     Auth {
         signature: String,
@@ -53,6 +56,14 @@ pub enum Message {
     FileCancel {
         file_id: String,
     },
+    /// Our current chain heads; the other side replies with the blocks we lack.
+    ChainHeads {
+        heads: Vec<String>,
+    },
+    /// One signed message block (see `crate::chain`).
+    ChainBlock {
+        block: crate::chain::Block,
+    },
     Bye,
 }
 
@@ -64,6 +75,7 @@ impl Message {
             peer_id: None,
             pubkey: None,
             nonce: None,
+            caps: Vec::new(),
         }
     }
 
@@ -79,6 +91,7 @@ impl Message {
             peer_id: Some(pk.clone()),
             pubkey: Some(pk),
             nonce: Some(nonce_hex.into()),
+            caps: vec![crate::chain::CAP.to_string()],
         }
     }
 
@@ -124,6 +137,7 @@ mod tests {
         let s = serde_json::to_string(&m).unwrap();
         assert!(s.contains("\"pubkey\":\"deadbeef\""));
         assert!(s.contains("\"nonce\":\"cafe\""));
+        assert!(s.contains("\"caps\":[\"chain1\"]"));
         let back: Message = serde_json::from_str(&s).unwrap();
         assert_eq!(m, back);
     }

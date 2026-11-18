@@ -14,6 +14,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::chain::Chains;
 use crate::event::AppEvent;
 use crate::identity::Identity;
 use protocol::Message;
@@ -33,6 +34,11 @@ pub enum NetCmd {
     SendTyping {
         id: PeerId,
         active: bool,
+    },
+    /// Deliver a chain block (already stored locally).
+    SendBlock {
+        id: PeerId,
+        block: crate::chain::Block,
     },
     /// Offer a local file to the peer.
     SendFile {
@@ -84,6 +90,7 @@ struct PeerHandle {
 pub struct NetSupervisor {
     username: String,
     identity: Arc<Identity>,
+    chains: Arc<Chains>,
     peers: HashMap<PeerId, PeerHandle>,
     cmd_rx: mpsc::Receiver<NetCmd>,
     evt_tx: mpsc::Sender<AppEvent>,
@@ -93,12 +100,14 @@ impl NetSupervisor {
     pub fn new(
         username: String,
         identity: Arc<Identity>,
+        chains: Arc<Chains>,
         cmd_rx: mpsc::Receiver<NetCmd>,
         evt_tx: mpsc::Sender<AppEvent>,
     ) -> Self {
         Self {
             username,
             identity,
+            chains,
             peers: HashMap::new(),
             cmd_rx,
             evt_tx,
@@ -124,6 +133,9 @@ impl NetSupervisor {
     }
 
     async fn handle_cmd(&mut self, cmd: NetCmd) {
+        // Drop handles of finished peer tasks first, so a dead connection
+        // never blocks redialing the same peer id.
+        self.peers.retain(|_, h| !h.tx.is_closed());
         match cmd {
             NetCmd::Connect { id, addr } => {
                 if self.peers.contains_key(&id) {
@@ -131,6 +143,7 @@ impl NetSupervisor {
                 }
                 let username = self.username.clone();
                 let identity = Arc::clone(&self.identity);
+                let chains = Arc::clone(&self.chains);
                 let evt_tx = self.evt_tx.clone();
                 let (out_tx, out_rx) = mpsc::channel::<PeerCmd>(64);
                 self.peers.insert(id.clone(), PeerHandle { tx: out_tx });
@@ -138,7 +151,7 @@ impl NetSupervisor {
                     match TcpStream::connect(addr).await {
                         Ok(stream) => {
                             peer::run_peer(
-                                id, stream, addr, username, identity, out_rx, evt_tx, true,
+                                id, stream, addr, username, identity, chains, out_rx, evt_tx, true,
                             )
                             .await;
                         }
@@ -156,6 +169,12 @@ impl NetSupervisor {
             }
             NetCmd::SendText { id, body } => {
                 self.to_peer(&id, PeerCmd::Send(Message::text(body))).await;
+            }
+            NetCmd::SendBlock { id, block } => {
+                // Not connected: the block stays queued in the chain and goes
+                // out with the next sync.
+                self.to_peer(&id, PeerCmd::Send(Message::ChainBlock { block }))
+                    .await;
             }
             NetCmd::SendTyping { id, active } => {
                 self.to_peer(&id, PeerCmd::Send(Message::Typing { active }))
@@ -221,8 +240,12 @@ impl NetSupervisor {
         let evt_tx = self.evt_tx.clone();
         let username = self.username.clone();
         let identity = Arc::clone(&self.identity);
+        let chains = Arc::clone(&self.chains);
         tokio::spawn(async move {
-            peer::run_peer(id, stream, addr, username, identity, out_rx, evt_tx, false).await;
+            peer::run_peer(
+                id, stream, addr, username, identity, chains, out_rx, evt_tx, false,
+            )
+            .await;
         });
     }
 }
@@ -232,13 +255,14 @@ pub async fn run_net(
     bind_port: u16,
     username: String,
     identity: Arc<Identity>,
+    chains: Arc<Chains>,
     cmd_rx: mpsc::Receiver<NetCmd>,
     evt_tx: mpsc::Sender<AppEvent>,
 ) -> Result<u16> {
     let (incoming_tx, incoming_rx) = mpsc::channel::<(TcpStream, SocketAddr)>(32);
     let (listener, actual_port) = server::bind(bind_port).await?;
     tokio::spawn(server::accept_loop(listener, incoming_tx));
-    let sup = NetSupervisor::new(username, identity, cmd_rx, evt_tx);
+    let sup = NetSupervisor::new(username, identity, chains, cmd_rx, evt_tx);
     tokio::spawn(sup.run(incoming_rx));
     Ok(actual_port)
 }

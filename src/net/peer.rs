@@ -11,6 +11,7 @@ use tracing::{debug, info, warn};
 use super::protocol::{read_frame, write_frame, Message};
 use super::transfer::Transfers;
 use super::{PeerCmd, PeerId};
+use crate::chain::{self, Chains, Inserted};
 use crate::event::AppEvent;
 use crate::history_store::{self, Direction, StoredLine};
 use crate::identity::{self, Identity};
@@ -22,6 +23,7 @@ pub async fn run_peer(
     addr: SocketAddr,
     self_username: String,
     identity: Arc<Identity>,
+    chains: Arc<Chains>,
     mut out_rx: mpsc::Receiver<PeerCmd>,
     evt_tx: mpsc::Sender<AppEvent>,
     dialed: bool,
@@ -58,19 +60,20 @@ pub async fn run_peer(
         return;
     }
 
-    let (remote_username, remote_pubkey_hex, remote_pubkey_bytes, remote_nonce) =
+    let (remote_username, remote_pubkey_hex, remote_pubkey_bytes, remote_nonce, remote_caps) =
         match read_frame(&mut r).await {
             Ok(Some(Message::Hello {
                 username,
                 version,
                 pubkey,
                 nonce,
+                caps,
                 peer_id: _,
             })) => {
-                debug!(%username, %version, %addr, "peer hello");
+                debug!(%username, %version, %addr, ?caps, "peer hello");
                 let pk_bytes = pubkey.as_deref().and_then(decode_pubkey);
                 let nonce_bytes = nonce.as_deref().and_then(|s| hex::decode(s).ok());
-                (username, pubkey, pk_bytes, nonce_bytes)
+                (username, pubkey, pk_bytes, nonce_bytes, caps)
             }
             Ok(Some(other)) => {
                 warn!(?other, %addr, "expected hello, got other frame");
@@ -205,6 +208,28 @@ pub async fn run_peer(
             .await;
     }
 
+    // Signed message chain: only between verified peers that both speak it.
+    let chain_pk: Option<String> = authenticated_pubkey
+        .clone()
+        .filter(|_| remote_caps.iter().any(|c| c == chain::CAP));
+    if let Some(pk) = &chain_pk {
+        if let Err(e) = chains.set_name(pk, &remote_username) {
+            warn!(error=%e, "saving contact name failed");
+        }
+        let _ = evt_tx
+            .send(AppEvent::PeerChainReady { id: id.clone() })
+            .await;
+        // Kick off sync: the peer answers with whatever we're missing.
+        match chains.with(pk, |c| c.heads()) {
+            Ok(heads) => {
+                if let Err(e) = write_frame(&mut w, &Message::ChainHeads { heads }).await {
+                    warn!(error=%e, %addr, "chain heads write failed");
+                }
+            }
+            Err(e) => warn!(error=%e, "chain load failed"),
+        }
+    }
+
     // ---- Main loop ----
 
     // Frames are read on their own task: `read_line` is not cancel-safe, so
@@ -278,6 +303,48 @@ pub async fn run_peer(
                             xfer.on_done(file_id, sha256).await;
                         }
                         Message::FileCancel { file_id } => xfer.on_cancel(file_id).await,
+                        Message::ChainHeads { heads } => {
+                            if let Some(pk) = &chain_pk {
+                                match chains.with(pk, |c| {
+                                    c.mark_peer_heads(&heads);
+                                    c.missing_for(&heads)
+                                }) {
+                                    Ok(blocks) => replies.extend(
+                                        blocks.into_iter().map(|block| Message::ChainBlock { block }),
+                                    ),
+                                    Err(e) => warn!(error=%e, "chain sync failed"),
+                                }
+                            }
+                        }
+                        Message::ChainBlock { block } => match &chain_pk {
+                            Some(pk) => {
+                                let res = chains.with(pk, |c| match c.insert(block) {
+                                    Ok(Inserted::New(hashes)) => Ok(Some(
+                                        hashes
+                                            .iter()
+                                            .filter_map(|h| c.get(h))
+                                            .filter(|b| b.author == *pk)
+                                            .map(|b| b.body.clone())
+                                            .collect::<Vec<_>>(),
+                                    )),
+                                    Ok(_) => Ok(None),
+                                    Err(e) => Err(e),
+                                });
+                                match res {
+                                    Ok(Ok(Some(from_peer))) => {
+                                        let _ = evt_tx.send(AppEvent::ChainChanged {
+                                            id: id.clone(),
+                                            pubkey: pk.clone(),
+                                            from_peer,
+                                        }).await;
+                                    }
+                                    Ok(Ok(None)) => {}
+                                    Ok(Err(e)) => warn!(error=%e, %addr, "rejected chain block"),
+                                    Err(e) => warn!(error=%e, "chain load failed"),
+                                }
+                            }
+                            None => warn!(%addr, "chain block from a peer without chain support"),
+                        },
                         Message::Bye => {
                             info!(%addr, "peer said bye");
                             break;
@@ -305,6 +372,13 @@ pub async fn run_peer(
                         if let Err(e) = write_frame(&mut w, &msg).await {
                             warn!(error=%e, %addr, "write error");
                             break;
+                        }
+                        if let Message::ChainBlock { block } = &msg {
+                            mark_sent(&chains, chain_pk.as_deref(), &block.hash);
+                            let _ = evt_tx.send(AppEvent::BlockDelivered {
+                                id: id.clone(),
+                                hash: block.hash.clone(),
+                            }).await;
                         }
                         if let (Some(body), Some(pk)) = (text_body, authenticated_pubkey.as_ref()) {
                             if let Err(e) = history_store::append(pk, &StoredLine {
@@ -346,6 +420,15 @@ pub async fn run_peer(
                 write_failed = true;
                 break;
             }
+            if let Message::ChainBlock { block } = &msg {
+                mark_sent(&chains, chain_pk.as_deref(), &block.hash);
+                let _ = evt_tx
+                    .send(AppEvent::BlockDelivered {
+                        id: id.clone(),
+                        hash: block.hash.clone(),
+                    })
+                    .await;
+            }
         }
         if write_failed {
             break;
@@ -357,6 +440,16 @@ pub async fn run_peer(
     let _ = evt_tx
         .send(AppEvent::PeerDisconnected { id: id.clone() })
         .await;
+}
+
+/// Persist that the peer now has block `hash`.
+fn mark_sent(chains: &Chains, pk: Option<&str>, hash: &str) {
+    if let Some(pk) = pk {
+        let hash = hash.to_string();
+        if let Err(e) = chains.with(pk, |c| c.mark_sent([&hash])) {
+            warn!(error=%e, "chain delivery update failed");
+        }
+    }
 }
 
 fn decode_pubkey(s: &str) -> Option<[u8; 32]> {

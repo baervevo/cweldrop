@@ -27,8 +27,10 @@ The binary writes to `~/.local/share/cweldrop/`:
 - `identity.key` — ed25519 secret seed, mode 0600. Generated once per user account, reused across runs.
 - `identity.pub` — public key, mode 0644.
 - `history/<pubkey_hex>.jsonl` — per-peer chat transcripts.
+- `chains/<pubkey_hex>.jsonl` — signed message chain per peer (`src/chain.rs`); `.sent` sibling = delivered block hashes; `chains/names.json` = last known peer names.
+- `settings.json` — `:settings` panel values (incoming file policy, size cap, download dir).
 
-Tests must NOT use `Identity::load_or_create()` (which touches the real `~/.local/share/cweldrop/`). Use `Identity::load_or_create_in(&tmp_path)` with a unique temp dir per test.
+Tests must NOT use `Identity::load_or_create()` (which touches the real `~/.local/share/cweldrop/`). Use `Identity::load_or_create_in(&tmp_path)` with a unique temp dir per test. Likewise use `Chains::open_in(identity, tmp_path)` and `Settings::load_in`/`save_in`, never `Chains::open()` / `Settings::load()`.
 
 ## Logging
 

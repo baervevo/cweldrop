@@ -1,4 +1,5 @@
 pub mod app;
+pub mod chain;
 pub mod discovery;
 pub mod event;
 pub mod files;

@@ -8,7 +8,9 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, ChatLine, FileInfo, FileState, Focus, LinkRegion, LinkTarget, PeerStatus};
+use crate::app::{
+    App, ChatLine, Delivery, FileInfo, FileState, Focus, LinkRegion, LinkTarget, PeerStatus,
+};
 use crate::files;
 use crate::links;
 
@@ -138,6 +140,9 @@ fn draw_right(f: &mut Frame, app: &mut App, area: Rect) {
                     match &cl.file {
                         Some(file) => spans.extend(file_spans(file, is_me)),
                         None => spans.extend(body_spans(&cl.body)),
+                    }
+                    if let Some(mark) = &cl.chain {
+                        spans.extend(delivery_span(mark.delivery));
                     }
                     Line::from(spans)
                 })
@@ -320,6 +325,17 @@ fn link_regions(buf: &Buffer, area: Rect, targets: &[(String, LinkTarget)]) -> V
         }));
     }
     out
+}
+
+/// Trailing marker for our own chain messages.
+fn delivery_span(d: Delivery) -> Option<Span<'static>> {
+    let dim = Style::default().fg(Color::DarkGray);
+    match d {
+        Delivery::Received => None,
+        Delivery::Queued => Some(Span::styled(" ⏳", dim)),
+        Delivery::Sent => Some(Span::styled(" ✓", dim)),
+        Delivery::Acked => Some(Span::styled(" ✓✓", Style::default().fg(Color::Green))),
+    }
 }
 
 /// Every clickable thing in a chat as (text exactly as rendered, target).
@@ -542,6 +558,7 @@ mod tests {
             last_error: None,
             pubkey: None,
             typing_at: None,
+            chain: false,
         });
         app.history.insert(
             "p".into(),

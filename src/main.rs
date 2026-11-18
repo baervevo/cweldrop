@@ -21,6 +21,7 @@ use tokio::sync::mpsc;
 use tracing::{error, info};
 
 use cweldrop::app::App;
+use cweldrop::chain::Chains;
 use cweldrop::event::{AppEvent, ImageProto};
 use cweldrop::identity::Identity;
 use cweldrop::net::NetCmd;
@@ -73,10 +74,12 @@ async fn main() -> Result<()> {
     let (evt_tx, mut evt_rx) = mpsc::channel::<AppEvent>(256);
     let (cmd_tx, cmd_rx) = mpsc::channel::<NetCmd>(256);
 
+    let chains = Chains::open(Arc::clone(&identity)).context("open message chains")?;
     let actual_port = net::run_net(
         cli.port,
         username.clone(),
         Arc::clone(&identity),
+        Arc::clone(&chains),
         cmd_rx,
         evt_tx.clone(),
     )
@@ -115,7 +118,8 @@ async fn main() -> Result<()> {
 
     let app = App::new(username, actual_port)
         .with_pubkey(identity.pubkey_hex())
-        .with_settings(Settings::load());
+        .with_settings(Settings::load())
+        .with_chains(chains);
     let result = run_ui(&mut term, app, cmd_tx.clone(), evt_tx, &mut evt_rx, picker).await;
 
     let _ = disable_raw_mode();

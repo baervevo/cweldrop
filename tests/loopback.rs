@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use cweldrop::chain::Chains;
 use cweldrop::event::AppEvent;
 use cweldrop::identity::Identity;
 use cweldrop::net::{self, NetCmd};
@@ -21,6 +22,12 @@ fn fresh_identity() -> Arc<Identity> {
     Arc::new(Identity::load_or_create_in(&dir).expect("identity"))
 }
 
+/// A chain store in a fresh temp dir.
+fn fresh_chains(id: &Arc<Identity>) -> Arc<Chains> {
+    let dir = std::env::temp_dir().join(format!("cweldrop-chains-{}", rand::random::<u64>()));
+    Chains::open_in(Arc::clone(id), dir)
+}
+
 /// Spin up two NetSupervisors on 127.0.0.1, dial one from the other, exchange a text frame.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_supervisors_exchange_text() {
@@ -35,6 +42,7 @@ async fn two_supervisors_exchange_text() {
         0,
         "alice".to_string(),
         Arc::clone(&a_id),
+        fresh_chains(&a_id),
         a_cmd_rx,
         a_evt_tx,
     )
@@ -43,9 +51,16 @@ async fn two_supervisors_exchange_text() {
 
     let (b_evt_tx, mut b_evt_rx) = mpsc::channel::<AppEvent>(64);
     let (b_cmd_tx, b_cmd_rx) = mpsc::channel::<NetCmd>(64);
-    let _b_port = net::run_net(0, "bob".to_string(), Arc::clone(&b_id), b_cmd_rx, b_evt_tx)
-        .await
-        .expect("start B");
+    let _b_port = net::run_net(
+        0,
+        "bob".to_string(),
+        Arc::clone(&b_id),
+        fresh_chains(&b_id),
+        b_cmd_rx,
+        b_evt_tx,
+    )
+    .await
+    .expect("start B");
 
     // B dials A.
     let a_addr = format!("127.0.0.1:{a_port}").parse().unwrap();
@@ -124,6 +139,7 @@ async fn bad_signature_rejected() {
         0,
         "alice".to_string(),
         Arc::clone(&a_id),
+        fresh_chains(&a_id),
         a_cmd_rx,
         a_evt_tx,
     )
@@ -175,6 +191,10 @@ async fn bad_signature_rejected() {
 }
 
 struct Pair {
+    a_chains: Arc<Chains>,
+    b_chains: Arc<Chains>,
+    a_pubkey: String,
+    b_pubkey: String,
     a_cmd: mpsc::Sender<NetCmd>,
     a_evt: mpsc::Receiver<AppEvent>,
     b_cmd: mpsc::Sender<NetCmd>,
@@ -183,27 +203,54 @@ struct Pair {
     b_to_a: String,
     /// A's id for its inbound connection from B.
     a_to_b: String,
+    a_addr: std::net::SocketAddr,
 }
 
 /// Two authenticated supervisors, B dialed A.
 async fn connected_pair() -> Pair {
     let (a_id, b_id) = (fresh_identity(), fresh_identity());
+    let (a_chains, b_chains) = (fresh_chains(&a_id), fresh_chains(&b_id));
+    connected_pair_with(a_id, b_id, a_chains, b_chains).await
+}
+
+async fn connected_pair_with(
+    a_id: Arc<Identity>,
+    b_id: Arc<Identity>,
+    a_chains: Arc<Chains>,
+    b_chains: Arc<Chains>,
+) -> Pair {
+    let a_pubkey = a_id.pubkey_hex();
     let b_pubkey = b_id.pubkey_hex();
     let (a_evt_tx, mut a_evt) = mpsc::channel::<AppEvent>(256);
     let (a_cmd, a_cmd_rx) = mpsc::channel::<NetCmd>(64);
-    let a_port = net::run_net(0, "alice".into(), a_id, a_cmd_rx, a_evt_tx)
-        .await
-        .expect("start A");
+    let a_port = net::run_net(
+        0,
+        "alice".into(),
+        a_id,
+        Arc::clone(&a_chains),
+        a_cmd_rx,
+        a_evt_tx,
+    )
+    .await
+    .expect("start A");
     let (b_evt_tx, mut b_evt) = mpsc::channel::<AppEvent>(256);
     let (b_cmd, b_cmd_rx) = mpsc::channel::<NetCmd>(64);
-    net::run_net(0, "bob".into(), b_id, b_cmd_rx, b_evt_tx)
-        .await
-        .expect("start B");
+    net::run_net(
+        0,
+        "bob".into(),
+        b_id,
+        Arc::clone(&b_chains),
+        b_cmd_rx,
+        b_evt_tx,
+    )
+    .await
+    .expect("start B");
     let b_to_a = "test-A".to_string();
+    let a_addr: std::net::SocketAddr = format!("127.0.0.1:{a_port}").parse().unwrap();
     b_cmd
         .send(NetCmd::Connect {
             id: b_to_a.clone(),
-            addr: format!("127.0.0.1:{a_port}").parse().unwrap(),
+            addr: a_addr,
         })
         .await
         .unwrap();
@@ -225,12 +272,17 @@ async fn connected_pair() -> Pair {
     )
     .await;
     Pair {
+        a_chains,
+        b_chains,
+        a_pubkey,
+        b_pubkey,
         a_cmd,
         a_evt,
         b_cmd,
         b_evt,
         b_to_a,
         a_to_b,
+        a_addr,
     }
 }
 
@@ -426,6 +478,122 @@ async fn short_file_aborted() {
     let _ = p.b_cmd.send(NetCmd::Shutdown).await;
     let _ = std::fs::remove_dir_all(&src_dir);
     let _ = std::fs::remove_dir_all(&dst_dir);
+}
+
+fn chain_bodies(chains: &Chains, peer: &str) -> Vec<String> {
+    chains
+        .with(peer, |c| c.entries().into_iter().map(|e| e.body).collect())
+        .unwrap()
+}
+
+/// A live chain message is verified and stored on the other side.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chain_message_delivered() {
+    let mut p = connected_pair().await;
+    expect_event(
+        &mut p.b_evt,
+        |e| matches!(e, AppEvent::PeerChainReady { .. }),
+        "B chain ready",
+    )
+    .await;
+    let block = p.b_chains.compose(&p.a_pubkey, "signed hi").unwrap();
+    let hash = block.hash.clone();
+    p.b_cmd
+        .send(NetCmd::SendBlock {
+            id: p.b_to_a.clone(),
+            block,
+        })
+        .await
+        .unwrap();
+    expect_event(
+        &mut p.b_evt,
+        |e| matches!(e, AppEvent::BlockDelivered { hash: h, .. } if *h == hash),
+        "B delivered",
+    )
+    .await;
+    expect_event(
+        &mut p.a_evt,
+        |e| matches!(e, AppEvent::ChainChanged { from_peer, .. } if from_peer == &["signed hi"]),
+        "A got block",
+    )
+    .await;
+    assert_eq!(chain_bodies(&p.a_chains, &p.b_pubkey), vec!["signed hi"]);
+    let _ = p.a_cmd.send(NetCmd::Shutdown).await;
+    let _ = p.b_cmd.send(NetCmd::Shutdown).await;
+}
+
+/// Both sides write while apart; connecting syncs them to the same
+/// conversation in the same order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn offline_messages_sync_on_connect() {
+    let (a_id, b_id) = (fresh_identity(), fresh_identity());
+    let (a_chains, b_chains) = (fresh_chains(&a_id), fresh_chains(&b_id));
+    let (a_pk, b_pk) = (a_id.pubkey_hex(), b_id.pubkey_hex());
+    a_chains.compose(&b_pk, "a while apart 1").unwrap();
+    b_chains.compose(&a_pk, "b while apart").unwrap();
+    a_chains.compose(&b_pk, "a while apart 2").unwrap();
+
+    let mut p = connected_pair_with(a_id, b_id, a_chains, b_chains).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let a = chain_bodies(&p.a_chains, &p.b_pubkey);
+        let b = chain_bodies(&p.b_chains, &p.a_pubkey);
+        if a.len() == 3 && a == b {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "not synced: {a:?} vs {b:?}"
+        );
+        // Drain events so the peer tasks never block on a full channel.
+        while p.a_evt.try_recv().is_ok() {}
+        while p.b_evt.try_recv().is_ok() {}
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let heads_a = p.a_chains.with(&p.b_pubkey, |c| c.heads()).unwrap();
+    let heads_b = p.b_chains.with(&p.a_pubkey, |c| c.heads()).unwrap();
+    assert_eq!(heads_a, heads_b);
+    assert_eq!(
+        heads_a.len(),
+        2,
+        "two branches until the next message merges them"
+    );
+    let _ = p.a_cmd.send(NetCmd::Shutdown).await;
+    let _ = p.b_cmd.send(NetCmd::Shutdown).await;
+}
+
+/// After the remote hangs up, dialing the same peer id works again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn redial_after_remote_hangup() {
+    let mut p = connected_pair().await;
+    p.a_cmd
+        .send(NetCmd::Disconnect {
+            id: p.a_to_b.clone(),
+        })
+        .await
+        .unwrap();
+    expect_event(
+        &mut p.b_evt,
+        |e| matches!(e, AppEvent::PeerDisconnected { .. }),
+        "B saw hangup",
+    )
+    .await;
+    // B's handle for this id is now dead; a redial must not be ignored.
+    p.b_cmd
+        .send(NetCmd::Connect {
+            id: p.b_to_a.clone(),
+            addr: p.a_addr,
+        })
+        .await
+        .unwrap();
+    expect_event(
+        &mut p.b_evt,
+        |e| matches!(e, AppEvent::PeerAuthenticated { .. }),
+        "B re-authenticated",
+    )
+    .await;
+    let _ = p.a_cmd.send(NetCmd::Shutdown).await;
+    let _ = p.b_cmd.send(NetCmd::Shutdown).await;
 }
 
 async fn expect_event<F>(rx: &mut mpsc::Receiver<AppEvent>, pred: F, label: &str)

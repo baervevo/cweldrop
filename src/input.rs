@@ -206,20 +206,9 @@ fn handle_input(app: &mut App, k: KeyEvent) -> Vec<NetCmd> {
             }
             // Sending jumps the view back to newest.
             app.chat_scroll = 0;
-            if let Some(p) = app.selected_peer() {
-                if matches!(p.status, PeerStatus::Online) {
-                    let id = p.id.clone();
-                    app.push_self_message(&id, body.clone());
-                    let mut cmds = app.typing_stop();
-                    cmds.push(NetCmd::SendText { id, body });
-                    return cmds;
-                } else {
-                    app.status_msg = format!("peer not connected ({:?})", p.status);
-                }
-            } else {
-                app.status_msg = "no peer selected".to_string();
-            }
-            Vec::new()
+            let mut cmds = app.typing_stop();
+            cmds.extend(app.send_text(body));
+            cmds
         }
         KeyCode::Char(c) => {
             insert_at_cursor(&mut app.input, &mut app.input_cursor, c);

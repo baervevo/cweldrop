@@ -60,6 +60,7 @@ cweldrop --port 7422 --nick b
 | `:accept [n]` / `:reject [n]` | Answer the newest (or n-th newest) incoming file offer |
 | `:view [n]`    | Show the newest (or n-th newest) image in this chat (also: click its name) |
 | `:settings`    | Settings panel: incoming file policy (ask / auto-accept / reject), size cap, download folder |
+| `:verify`      | Show the safety code for this chat; if your peer sees the same code, you hold each other's real keys |
 | `:q`           | Quit                                |
 
 ## Wire protocol
@@ -71,6 +72,24 @@ Newline-delimited JSON frames over a single TCP connection:
 {"kind":"text","body":"hello there"}
 {"kind":"bye"}
 ```
+
+Signed message chain (peers whose `hello` carries `"caps":["chain1"]`):
+every text message is a block signed by its author and hash-linked to its
+parents, rooted at `sha256("cweldrop-genesis-v1" ‖ sorted pubkeys)`. Nobody
+else can inject a message, and none can be edited or reordered without
+breaking the hashes. Messages to an offline contact are queued in the chain;
+on connect each side sends its heads and gets back every block it's missing.
+Writes made on both sides while apart fork the chain; the next message
+merges the branches, and both sides sort the result identically. Stored in
+`~/.local/share/cweldrop/chains/<pubkey>.jsonl`.
+
+```
+{"kind":"chain_heads","heads":["5e1f…","a90c…"]}
+{"kind":"chain_block","block":{"prev":["5e1f…"],"author":"<pubkey>","at":1763489000123,"body":"hi","sig":"…","hash":"…"}}
+```
+
+Marks after your messages: ⏳ queued (peer offline), ✓ delivered, ✓✓ the
+peer has signed a later message on top of it.
 
 File transfer (receiver must answer the offer before any data flows; chunks
 are 32 KiB base64 and interleave with chat; the receiver checks size and

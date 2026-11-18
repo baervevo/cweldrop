@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Utc};
 
+use crate::chain::{self, Chains};
 use crate::event::{AppEvent, ImageProto};
 use crate::files;
 use crate::history_store;
@@ -31,6 +33,9 @@ pub struct Peer {
     pub pubkey: Option<String>,
     /// When the remote last signalled it was typing. Cleared on stop or expiry.
     pub typing_at: Option<Instant>,
+    /// Speaks the signed message chain; text goes via `crate::chain` and can
+    /// be queued while the peer is offline.
+    pub chain: bool,
 }
 
 /// How long a "typing…" indicator stays visible after the last ping. The
@@ -59,6 +64,27 @@ pub struct ChatLine {
     pub at: SystemTime,
     /// Present when this line is a file transfer rather than a text message.
     pub file: Option<FileInfo>,
+    /// Present when this message is a signed chain block.
+    pub chain: Option<ChainMark>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainMark {
+    pub hash: String,
+    pub delivery: Delivery,
+}
+
+/// Delivery state of a chain message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    /// Written by the peer.
+    Received,
+    /// Ours, not yet sent (peer offline): goes out on the next sync.
+    Queued,
+    /// Ours, written to the peer's socket.
+    Sent,
+    /// Ours, and the peer signed a later block on top of it: provably seen.
+    Acked,
 }
 
 impl ChatLine {
@@ -68,6 +94,7 @@ impl ChatLine {
             body,
             at: SystemTime::now(),
             file: None,
+            chain: None,
         }
     }
 }
@@ -158,6 +185,8 @@ pub struct App {
     pub pending_view: Option<PathBuf>,
     /// Ask the main loop for a full terminal clear (after graphics overlays).
     pub needs_clear: bool,
+    /// Signed message chains; `None` disables chain messaging (tests).
+    pub chains: Option<Arc<Chains>>,
 }
 
 /// What a clickable region in the chat leads to.
@@ -206,6 +235,181 @@ impl App {
             viewer: None,
             pending_view: None,
             needs_clear: false,
+            chains: None,
+        }
+    }
+
+    /// Enable chain messaging and list everyone we have a chain with as an
+    /// offline contact, so messages can be queued for them right away.
+    pub fn with_chains(mut self, chains: Arc<Chains>) -> Self {
+        let known = chains.known_peers();
+        self.chains = Some(chains);
+        for pk in known {
+            if self
+                .peers
+                .iter()
+                .any(|p| p.pubkey.as_deref() == Some(pk.as_str()))
+            {
+                continue;
+            }
+            self.load_history(&pk);
+            let from_history = self
+                .history
+                .get(&pk)
+                .and_then(|h| h.iter().rev().find(|l| l.from != self.self_username))
+                .map(|l| l.from.clone());
+            let username = self
+                .chains
+                .as_ref()
+                .and_then(|c| c.name(&pk))
+                .or(from_history)
+                .unwrap_or_else(|| format!("{}…", &pk[..8]));
+            self.peers.push(Peer {
+                id: format!("contact:{pk}"),
+                username,
+                addr: None,
+                status: PeerStatus::Offline,
+                last_error: None,
+                pubkey: Some(pk.clone()),
+                typing_at: None,
+                chain: true,
+            });
+            self.rebuild_chain_lines(&pk);
+        }
+        self
+    }
+
+    /// Load the persisted (non-chain) transcript for `pubkey`.
+    fn load_history(&mut self, pubkey: &str) {
+        match history_store::load(pubkey) {
+            Ok(lines) => {
+                let loaded: Vec<ChatLine> = lines
+                    .into_iter()
+                    .map(|sl| ChatLine {
+                        from: sl.from,
+                        body: sl.body,
+                        at: system_time_from_chrono(sl.at),
+                        file: sl.file.map(|f| FileInfo {
+                            file_id: String::new(),
+                            name: f.name,
+                            size: f.size,
+                            path: Some(f.path),
+                            state: FileState::Done,
+                        }),
+                        chain: None,
+                    })
+                    .collect();
+                self.history.insert(pubkey.to_string(), loaded);
+            }
+            Err(e) => {
+                tracing::warn!(error=%e, %pubkey, "history load failed");
+                self.history.entry(pubkey.to_string()).or_default();
+            }
+        }
+    }
+
+    /// Re-derive the chain messages of the conversation with `pubkey` and
+    /// merge them, by time, with its other lines (files, legacy text).
+    fn rebuild_chain_lines(&mut self, pubkey: &str) {
+        let Some(chains) = self.chains.clone() else {
+            return;
+        };
+        let entries = match chains.with(pubkey, |c| c.entries()) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(error = %e, %pubkey, "chain load failed");
+                return;
+            }
+        };
+        if entries.is_empty() {
+            return;
+        }
+        let peer_name = self
+            .peers
+            .iter()
+            .find(|p| p.pubkey.as_deref() == Some(pubkey))
+            .map(|p| p.username.clone())
+            .unwrap_or_else(|| format!("{}…", &pubkey[..8.min(pubkey.len())]));
+        let chain_lines: Vec<ChatLine> = entries
+            .into_iter()
+            .map(|e| {
+                let delivery = if !e.author_is_me {
+                    Delivery::Received
+                } else if e.acked {
+                    Delivery::Acked
+                } else if e.delivered {
+                    Delivery::Sent
+                } else {
+                    Delivery::Queued
+                };
+                ChatLine {
+                    from: if e.author_is_me {
+                        self.self_username.clone()
+                    } else {
+                        peer_name.clone()
+                    },
+                    body: e.body,
+                    at: system_time_from_millis(e.at),
+                    file: None,
+                    chain: Some(ChainMark {
+                        hash: e.hash,
+                        delivery,
+                    }),
+                }
+            })
+            .collect();
+        let others: Vec<ChatLine> = self
+            .history
+            .remove(pubkey)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|l| l.chain.is_none())
+            .collect();
+        self.history
+            .insert(pubkey.to_string(), merge_by_time(chain_lines, others));
+    }
+
+    /// Send (or queue) a text message to the selected peer.
+    pub fn send_text(&mut self, body: String) -> Vec<NetCmd> {
+        let Some(p) = self.selected_peer() else {
+            self.status_msg = "no peer selected".to_string();
+            return Vec::new();
+        };
+        let (id, status, name) = (p.id.clone(), p.status, p.username.clone());
+        let chain_pk = p.pubkey.clone().filter(|_| p.chain);
+        if let (Some(chains), Some(pk)) = (self.chains.clone(), chain_pk) {
+            return match chains.compose(&pk, &body) {
+                Ok(block) => {
+                    self.rebuild_chain_lines(&pk);
+                    if status == PeerStatus::Online {
+                        vec![NetCmd::SendBlock { id, block }]
+                    } else {
+                        self.status_msg =
+                            format!("queued for {name}: delivered when they're back online");
+                        Vec::new()
+                    }
+                }
+                Err(e) => {
+                    self.status_msg = format!("could not write message: {e}");
+                    Vec::new()
+                }
+            };
+        }
+        if status == PeerStatus::Online {
+            self.push_self_message(&id, body.clone());
+            vec![NetCmd::SendText { id, body }]
+        } else {
+            self.status_msg = format!("peer not connected ({status:?})");
+            Vec::new()
+        }
+    }
+
+    /// Desktop alert for `body` from `from`, unless that chat is on screen.
+    fn alert_unless_viewing(&self, key: &str, from: &str, body: &str) {
+        let viewing =
+            self.terminal_focused && self.selected_peer().is_some_and(|p| p.history_key() == key);
+        if !viewing {
+            crate::notify::message(from, body);
         }
     }
 
@@ -275,6 +479,7 @@ impl App {
                         last_error: None,
                         pubkey: None,
                         typing_at: None,
+                        chain: false,
                     });
                 }
             }
@@ -305,6 +510,7 @@ impl App {
                         last_error: None,
                         pubkey: None,
                         typing_at: None,
+                        chain: false,
                     });
                 }
             }
@@ -336,31 +542,9 @@ impl App {
 
                     // Load persisted history once, on first authentication.
                     if !self.history.contains_key(&pubkey) {
-                        match history_store::load(&pubkey) {
-                            Ok(lines) => {
-                                let loaded: Vec<ChatLine> = lines
-                                    .into_iter()
-                                    .map(|sl| ChatLine {
-                                        from: sl.from,
-                                        body: sl.body,
-                                        at: system_time_from_chrono(sl.at),
-                                        file: sl.file.map(|f| FileInfo {
-                                            file_id: String::new(),
-                                            name: f.name,
-                                            size: f.size,
-                                            path: Some(f.path),
-                                            state: FileState::Done,
-                                        }),
-                                    })
-                                    .collect();
-                                self.history.insert(pubkey.clone(), loaded);
-                            }
-                            Err(e) => {
-                                tracing::warn!(error=%e, %pubkey, "history load failed");
-                                self.history.entry(pubkey.clone()).or_default();
-                            }
-                        }
+                        self.load_history(&pubkey);
                     }
+                    self.rebuild_chain_lines(&pubkey);
 
                     // Merge any chat that was accumulated under the connection
                     // id before authentication completed.
@@ -425,17 +609,51 @@ impl App {
                 }
                 // Notify if the user isn't already looking at this chat, either
                 // because the terminal is unfocused or a different peer is open.
-                let viewing = self.terminal_focused
-                    && self
-                        .selected_peer()
-                        .is_some_and(|p| p.history_key() == key.as_str());
-                if !viewing {
-                    crate::notify::message(&from, &body);
-                }
+                self.alert_unless_viewing(&key, &from, &body);
                 self.history
                     .entry(key)
                     .or_default()
                     .push(ChatLine::text(from, body));
+            }
+            AppEvent::PeerChainReady { id } => {
+                if let Some(idx) = self.peer_index(&id) {
+                    self.peers[idx].chain = true;
+                }
+            }
+            AppEvent::ChainChanged {
+                id,
+                pubkey,
+                from_peer,
+            } => {
+                if let Some(idx) = self.peer_index(&id) {
+                    self.peers[idx].typing_at = None;
+                }
+                self.rebuild_chain_lines(&pubkey);
+                if !from_peer.is_empty() {
+                    let from = self
+                        .peer_index(&id)
+                        .map(|i| self.peers[i].username.clone())
+                        .unwrap_or_default();
+                    let body = if from_peer.len() == 1 {
+                        from_peer[0].clone()
+                    } else {
+                        format!("{} new messages", from_peer.len())
+                    };
+                    self.alert_unless_viewing(&pubkey, &from, &body);
+                }
+            }
+            AppEvent::BlockDelivered { hash, .. } => {
+                if let Some(m) = self
+                    .history
+                    .values_mut()
+                    .flatten()
+                    .filter_map(|l| l.chain.as_mut())
+                    .find(|m| m.hash == hash)
+                {
+                    if m.delivery == Delivery::Queued {
+                        m.delivery = Delivery::Sent;
+                    }
+                }
             }
             AppEvent::FileOffered {
                 id,
@@ -893,6 +1111,35 @@ impl App {
                 }
                 Vec::new()
             }
+            "verify" => {
+                let keys = (
+                    self.self_pubkey.as_deref().and_then(decode32),
+                    self.selected_peer()
+                        .and_then(|p| p.pubkey.as_deref())
+                        .and_then(decode32),
+                );
+                match keys {
+                    (Some(me), Some(them)) => {
+                        let p = self.selected_peer().expect("checked above");
+                        let key = p.history_key().to_string();
+                        let name = p.username.clone();
+                        let code = chain::safety_code(&me, &them);
+                        self.history.entry(key).or_default().push(ChatLine::text(
+                            "🔒".into(),
+                            format!(
+                                "safety code with {name}: {code} — if they see the same code, \
+                                 you're talking to the right person"
+                            ),
+                        ));
+                        self.chat_scroll = 0;
+                    }
+                    _ => {
+                        self.status_msg =
+                            "verify needs a peer that completed the key handshake".into()
+                    }
+                }
+                Vec::new()
+            }
             "settings" | "set" => {
                 self.focus = Focus::Settings;
                 self.settings_sel = 0;
@@ -905,6 +1152,36 @@ impl App {
             }
         }
     }
+}
+
+fn decode32(hex_str: &str) -> Option<[u8; 32]> {
+    hex::decode(hex_str).ok()?.try_into().ok()
+}
+
+fn system_time_from_millis(ms: i64) -> SystemTime {
+    if ms >= 0 {
+        SystemTime::UNIX_EPOCH + Duration::from_millis(ms as u64)
+    } else {
+        SystemTime::UNIX_EPOCH - Duration::from_millis(ms.unsigned_abs())
+    }
+}
+
+/// Merge two time-ordered line lists, keeping each list's own order (chain
+/// order is causal, so it must not be re-sorted).
+fn merge_by_time(chain: Vec<ChatLine>, others: Vec<ChatLine>) -> Vec<ChatLine> {
+    let mut out = Vec::with_capacity(chain.len() + others.len());
+    let mut a = chain.into_iter().peekable();
+    let mut b = others.into_iter().peekable();
+    loop {
+        let take_b = match (a.peek(), b.peek()) {
+            (Some(x), Some(y)) => y.at < x.at,
+            (None, Some(_)) => true,
+            (Some(_), None) => false,
+            (None, None) => break,
+        };
+        out.extend(if take_b { b.next() } else { a.next() });
+    }
+    out
 }
 
 fn system_time_from_chrono(dt: DateTime<Utc>) -> SystemTime {
@@ -1265,6 +1542,133 @@ mod tests {
         app.settings_edit = Some("/tmp/dl".into());
         app.settings_commit_edit();
         assert_eq!(app.settings.download_dir, PathBuf::from("/tmp/dl"));
+    }
+
+    fn test_identity() -> Arc<crate::identity::Identity> {
+        let dir = std::env::temp_dir().join(format!("cweldrop-app-id-{}", rand::random::<u64>()));
+        let id = crate::identity::Identity::load_or_create_in(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        Arc::new(id)
+    }
+
+    fn test_chains(id: &Arc<crate::identity::Identity>) -> Arc<Chains> {
+        let dir =
+            std::env::temp_dir().join(format!("cweldrop-app-chains-{}", rand::random::<u64>()));
+        Chains::open_in(Arc::clone(id), dir)
+    }
+
+    fn deliveries(app: &App, key: &str) -> Vec<(String, Delivery)> {
+        app.history[key]
+            .iter()
+            .filter_map(|l| l.chain.as_ref().map(|m| (l.body.clone(), m.delivery)))
+            .collect()
+    }
+
+    #[test]
+    fn queue_for_offline_contact_then_deliver_and_ack() {
+        let (me, them) = (test_identity(), test_identity());
+        let (my_chains, their_chains) = (test_chains(&me), test_chains(&them));
+        let them_pk = them.pubkey_hex();
+        my_chains.compose(&them_pk, "earlier").unwrap();
+
+        let mut app = App::new("me".into(), 7421)
+            .with_pubkey(me.pubkey_hex())
+            .with_chains(Arc::clone(&my_chains));
+        assert_eq!(app.peers.len(), 1, "stored chain becomes a contact");
+        let contact = app.peers[0].clone();
+        assert_eq!(contact.status, PeerStatus::Offline);
+        assert!(contact.chain);
+        assert_eq!(contact.pubkey.as_deref(), Some(them_pk.as_str()));
+
+        assert!(app.send_text("later".into()).is_empty(), "offline: queued");
+        assert!(app.status_msg.contains("queued"));
+        assert_eq!(
+            deliveries(&app, &them_pk),
+            vec![
+                ("earlier".into(), Delivery::Queued),
+                ("later".into(), Delivery::Queued)
+            ]
+        );
+
+        // The next connection's sync writes both blocks.
+        let hashes: Vec<String> = app.history[&them_pk]
+            .iter()
+            .filter_map(|l| l.chain.as_ref().map(|m| m.hash.clone()))
+            .collect();
+        for hash in &hashes {
+            app.on_event(AppEvent::BlockDelivered {
+                id: contact.id.clone(),
+                hash: hash.clone(),
+            });
+        }
+        assert!(deliveries(&app, &them_pk)
+            .iter()
+            .all(|(_, d)| *d == Delivery::Sent));
+
+        // They receive everything and reply on top: our messages are acked.
+        let me_pk = me.pubkey_hex();
+        for b in my_chains.with(&them_pk, |c| c.missing_for(&[])).unwrap() {
+            their_chains.with(&me_pk, |c| c.insert(b)).unwrap().unwrap();
+        }
+        let reply = their_chains.compose(&me_pk, "got them").unwrap();
+        my_chains
+            .with(&them_pk, |c| c.insert(reply))
+            .unwrap()
+            .unwrap();
+        app.on_event(AppEvent::ChainChanged {
+            id: contact.id.clone(),
+            pubkey: them_pk.clone(),
+            from_peer: vec!["got them".into()],
+        });
+        assert_eq!(
+            deliveries(&app, &them_pk),
+            vec![
+                ("earlier".into(), Delivery::Acked),
+                ("later".into(), Delivery::Acked),
+                ("got them".into(), Delivery::Received)
+            ]
+        );
+    }
+
+    #[test]
+    fn online_chain_peer_gets_block_and_legacy_peer_gets_text() {
+        let (me, them) = (test_identity(), test_identity());
+        let mut app = App::new("me".into(), 7421)
+            .with_pubkey(me.pubkey_hex())
+            .with_chains(test_chains(&me));
+        app.on_event(AppEvent::PeerConnecting {
+            id: "p".into(),
+            addr: "192.0.2.9:7421".parse().unwrap(),
+            dialed: true,
+        });
+        app.on_event(AppEvent::PeerAuthenticated {
+            id: "p".into(),
+            pubkey: them.pubkey_hex(),
+            username: "them".into(),
+        });
+        // No chain support announced yet: plain text.
+        assert!(matches!(
+            &app.send_text("a".into())[..],
+            [NetCmd::SendText { .. }]
+        ));
+        app.on_event(AppEvent::PeerChainReady { id: "p".into() });
+        assert!(
+            matches!(&app.send_text("b".into())[..], [NetCmd::SendBlock { block, .. }] if block.body == "b")
+        );
+    }
+
+    #[test]
+    fn verify_shows_symmetric_safety_code() {
+        let (me, them) = (test_identity(), test_identity());
+        let mut app = App::new("me".into(), 7421).with_pubkey(me.pubkey_hex());
+        app.run_command("verify");
+        assert!(app.status_msg.contains("handshake"), "no peer yet");
+        online_peer(&mut app, "p");
+        app.peers[0].pubkey = Some(them.pubkey_hex());
+        app.run_command("verify");
+        let line = app.history[&them.pubkey_hex()].last().unwrap().body.clone();
+        let code = chain::safety_code(&them.pubkey_bytes(), &me.pubkey_bytes());
+        assert!(line.contains(&code), "{line} should contain {code}");
     }
 
     #[test]

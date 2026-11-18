@@ -44,6 +44,23 @@ pub enum AppEvent {
         from: String,
         body: String,
     },
+    /// The authenticated peer speaks the signed message chain; text to it
+    /// goes through `crate::chain` (and can be queued while it's offline).
+    PeerChainReady {
+        id: PeerId,
+    },
+    /// New verified blocks were added to the chain with `pubkey`.
+    /// `from_peer` holds the bodies of those the peer wrote (for alerts).
+    ChainChanged {
+        id: PeerId,
+        pubkey: String,
+        from_peer: Vec<String>,
+    },
+    /// A chain block was written to the peer's socket.
+    BlockDelivered {
+        id: PeerId,
+        hash: String,
+    },
     /// Remote peer started (`active=true`) or stopped typing.
     PeerTyping {
         id: PeerId,
