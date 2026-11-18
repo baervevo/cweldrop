@@ -246,6 +246,8 @@ pub struct Viewer {
     pub error: Option<String>,
     /// First visible line (text only); clamped when drawn.
     pub scroll: u16,
+    /// Page shown for paged documents (PDF), 1-based.
+    pub page: u32,
 }
 
 pub struct App {
@@ -891,8 +893,13 @@ impl App {
                     }
                 }
             }
-            AppEvent::ViewerLoaded { path, result } => {
-                if let Some(v) = self.viewer.as_mut().filter(|v| v.path == path) {
+            AppEvent::ViewerLoaded { path, page, result } => {
+                // Ignore a stale page if the user already flipped past it.
+                if let Some(v) = self
+                    .viewer
+                    .as_mut()
+                    .filter(|v| v.path == path && v.page == page)
+                {
                     match result {
                         Ok(c) => v.content = Some(c),
                         Err(e) => v.error = Some(e),
@@ -975,6 +982,7 @@ impl App {
             content: None,
             error: None,
             scroll: 0,
+            page: 1,
         });
         self.pending_view = Some(path);
     }
@@ -983,6 +991,30 @@ impl App {
         if self.viewer.take().is_some() {
             self.needs_clear = true;
         }
+    }
+
+    /// Flip a paged document by `delta` pages; returns false if the viewer
+    /// isn't showing one (so the key can scroll instead).
+    pub fn viewer_page(&mut self, delta: i32) -> bool {
+        let Some(v) = self.viewer.as_mut() else {
+            return false;
+        };
+        let Some(Content::Image {
+            page: Some((cur, total)),
+            ..
+        }) = v.content
+        else {
+            return false;
+        };
+        let next = (cur as i32 + delta).clamp(1, total as i32) as u32;
+        if next != cur {
+            v.page = next;
+            v.content = None; // "loading…" until the new page arrives
+            v.error = None;
+            self.pending_view = Some(v.path.clone());
+            self.needs_clear = true; // drop the old page's graphics
+        }
+        true
     }
 
     /// Scroll the text viewer by `delta` lines.
@@ -2427,6 +2459,51 @@ mod tests {
         app.run_command("help");
         assert_eq!(app.focus, Focus::Command);
         assert!(app.command.is_empty());
+    }
+
+    #[test]
+    fn pdf_viewer_flips_pages_and_ignores_stale_ones() {
+        let mut app = App::new("me".into(), 7421);
+        app.open_viewer("/tmp/doc.pdf".into());
+        app.pending_view = None;
+        let page = |n| {
+            let picker = ratatui_image::picker::Picker::from_fontsize((10, 20));
+            Content::Image {
+                proto: crate::event::ImageProto(
+                    picker.new_resize_protocol(image::DynamicImage::new_rgb8(1, 1)),
+                ),
+                page: Some((n, 3)),
+            }
+        };
+        app.on_event(AppEvent::ViewerLoaded {
+            path: "/tmp/doc.pdf".into(),
+            page: 1,
+            result: Ok(page(1)),
+        });
+        assert!(
+            !app.viewer_page(-1) || app.pending_view.is_none(),
+            "already first"
+        );
+        assert!(app.viewer_page(1));
+        assert_eq!(app.viewer.as_ref().unwrap().page, 2);
+        assert_eq!(app.pending_view, Some("/tmp/doc.pdf".into()));
+        assert!(app.viewer.as_ref().unwrap().content.is_none(), "loading");
+        // A late page-1 result must not replace the page being loaded.
+        app.on_event(AppEvent::ViewerLoaded {
+            path: "/tmp/doc.pdf".into(),
+            page: 1,
+            result: Ok(page(1)),
+        });
+        assert!(app.viewer.as_ref().unwrap().content.is_none());
+        app.on_event(AppEvent::ViewerLoaded {
+            path: "/tmp/doc.pdf".into(),
+            page: 2,
+            result: Ok(page(2)),
+        });
+        assert!(app.viewer.as_ref().unwrap().content.is_some());
+        // Text has no pages: the key falls back to scrolling.
+        app.viewer.as_mut().unwrap().content = Some(Content::Text(Default::default()));
+        assert!(!app.viewer_page(1));
     }
 
     #[test]

@@ -373,7 +373,9 @@ fn viewable(f: &FileInfo) -> Option<&std::path::PathBuf> {
 /// "📎 name (size) — state" for a file transfer line.
 fn file_spans(f: &FileInfo, is_me: bool) -> Vec<Span<'static>> {
     let dim = Style::default().fg(Color::DarkGray);
-    let icon = if files::is_image(&f.name) {
+    let icon = if files::is_pdf(&f.name) {
+        "📄 "
+    } else if files::is_graphic(&f.name) {
         "🖼 "
     } else {
         "📎 "
@@ -395,7 +397,7 @@ fn file_spans(f: &FileInfo, is_me: bool) -> Vec<Span<'static>> {
         FileState::Transferring(b) => (format!("{}%", pct(*b)), Style::default().fg(Color::Yellow)),
         FileState::Done => match &f.path {
             Some(_) if is_me => ("sent · click or :view to open".to_string(), dim),
-            Some(p) if files::is_image(&f.name) => (
+            Some(p) if files::is_graphic(&f.name) => (
                 format!("click or :view to open · saved to {}", p.display()),
                 dim,
             ),
@@ -656,9 +658,13 @@ fn draw_files(f: &mut Frame, app: &App, area: Rect) {
 fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
     let Some(v) = app.viewer.as_mut() else { return };
     f.render_widget(Clear, area);
-    let hint = match v.content {
-        Some(Content::Text(_)) => "↑/↓ PgUp/PgDn scroll · Esc to close",
-        _ => "Esc to close",
+    let hint = match &v.content {
+        Some(Content::Text(_)) => "↑/↓ PgUp/PgDn scroll · Esc to close".to_string(),
+        Some(Content::Image {
+            page: Some((p, n)), ..
+        }) => format!("page {p}/{n} · PgUp/PgDn or ←/→ page · Esc to close"),
+        None if v.page > 1 => format!("page {} · loading… · Esc to close", v.page),
+        _ => "Esc to close".to_string(),
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -673,8 +679,8 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
                 .wrap(Wrap { trim: false }),
             inner,
         ),
-        (Some(Content::Image(img)), None) => {
-            f.render_stateful_widget(ratatui_image::StatefulImage::default(), inner, &mut img.0)
+        (Some(Content::Image { proto, .. }), None) => {
+            f.render_stateful_widget(ratatui_image::StatefulImage::default(), inner, &mut proto.0)
         }
         (Some(Content::Text(text)), None) => {
             let para = Paragraph::new(text.clone()).wrap(Wrap { trim: false });

@@ -59,7 +59,7 @@ cweldrop --port 7422 --nick b
 | `:send <path>` | Offer a file to the selected peer   |
 | `:accept [n\|name\|all]` / `:reject …` | Answer a file offer; with several pending and no argument, opens `:files` |
 | `:files`       | Pick from all files in this chat: Enter accept/open, `a`/`r` accept/reject, `A`/`R` all pending |
-| `:view [n\|name]` | Open a file in this chat (also: click its name): images in the graphics viewer, text with [bat](https://github.com/sharkdp/bat) highlighting (plain text without bat) |
+| `:view [n\|name]` | Open a file in this chat (also: click its name): images (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, TGA, QOI, PNM), SVG and PDF pages (PgUp/PgDn; needs poppler-utils) in the graphics viewer, text with [bat](https://github.com/sharkdp/bat) highlighting (plain text without bat) |
 | `:settings`    | Settings panel: incoming file policy (ask / auto-accept / reject), size cap, download folder |
 | `:verify`      | Show the safety code for this chat; if your peer sees the same code, you hold each other's real keys |
 | `:verify confirm` / `:verify forget` | Mark this contact's key as verified (✔), or undo it |

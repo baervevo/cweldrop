@@ -17,8 +17,16 @@ pub fn handle_key(app: &mut App, k: KeyEvent) -> Vec<NetCmd> {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => app.close_viewer(),
             KeyCode::Up | KeyCode::Char('k') => app.scroll_viewer(-1),
             KeyCode::Down | KeyCode::Char('j') => app.scroll_viewer(1),
-            KeyCode::PageUp => app.scroll_viewer(-20),
-            KeyCode::PageDown | KeyCode::Char(' ') => app.scroll_viewer(20),
+            KeyCode::PageUp | KeyCode::Left | KeyCode::Char('p') => {
+                if !app.viewer_page(-1) {
+                    app.scroll_viewer(-20);
+                }
+            }
+            KeyCode::PageDown | KeyCode::Right | KeyCode::Char(' ' | 'n') => {
+                if !app.viewer_page(1) {
+                    app.scroll_viewer(20);
+                }
+            }
             KeyCode::Home | KeyCode::Char('g') => app.scroll_viewer(i32::MIN / 2),
             KeyCode::End | KeyCode::Char('G') => app.scroll_viewer(i32::MAX / 2),
             _ => {}

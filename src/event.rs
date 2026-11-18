@@ -112,6 +112,7 @@ pub enum AppEvent {
     /// A file the user asked to view finished loading (off the UI thread).
     ViewerLoaded {
         path: PathBuf,
+        page: u32,
         result: Result<crate::preview::Content, String>,
     },
 }

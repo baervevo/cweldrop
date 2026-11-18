@@ -76,8 +76,44 @@ pub fn is_image(name: &str) -> bool {
         .map(|e| e.to_ascii_lowercase());
     matches!(
         ext.as_deref(),
-        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp")
+        Some(
+            "png"
+                | "jpg"
+                | "jpeg"
+                | "gif"
+                | "webp"
+                | "bmp"
+                | "tif"
+                | "tiff"
+                | "ico"
+                | "tga"
+                | "qoi"
+                | "pnm"
+                | "pbm"
+                | "pgm"
+                | "ppm"
+        )
     )
+}
+
+fn has_ext(name: &str, want: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case(want))
+}
+
+pub fn is_svg(name: &str) -> bool {
+    has_ext(name, "svg")
+}
+
+pub fn is_pdf(name: &str) -> bool {
+    has_ext(name, "pdf")
+}
+
+/// Shown as a picture by the viewer (raster, SVG or PDF page).
+pub fn is_graphic(name: &str) -> bool {
+    is_image(name) || is_svg(name) || is_pdf(name)
 }
 
 /// Expand a leading `~/` to the home directory.
@@ -138,5 +174,9 @@ mod tests {
         assert!(is_image("a.b.jpeg"));
         assert!(!is_image("x.txt"));
         assert!(!is_image("png"));
+        assert!(is_image("scan.TIFF"));
+        assert!(is_svg("logo.SVG") && !is_image("logo.svg"));
+        assert!(is_pdf("paper.pdf"));
+        assert!(is_graphic("a.pdf") && is_graphic("a.svg") && !is_graphic("a.txt"));
     }
 }

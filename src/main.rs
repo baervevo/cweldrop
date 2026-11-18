@@ -206,10 +206,11 @@ async fn run_ui<B: ratatui::backend::Backend>(
             links::open(&url);
         }
         if let Some(path) = app.pending_view.take() {
+            let page = app.viewer.as_ref().map_or(1, |v| v.page);
             let (picker, evt_tx) = (picker.clone(), evt_tx.clone());
             tokio::task::spawn_blocking(move || {
-                let result = cweldrop::preview::load(&path, &picker);
-                let _ = evt_tx.blocking_send(AppEvent::ViewerLoaded { path, result });
+                let result = cweldrop::preview::load(&path, page, &picker);
+                let _ = evt_tx.blocking_send(AppEvent::ViewerLoaded { path, page, result });
             });
         }
         if std::mem::take(&mut app.needs_clear) {
