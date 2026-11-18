@@ -1,4 +1,5 @@
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,13 +16,15 @@ use crossterm::terminal::{
 use futures_util::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui_image::picker::Picker;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
 use cweldrop::app::App;
-use cweldrop::event::AppEvent;
+use cweldrop::event::{AppEvent, ImageProto};
 use cweldrop::identity::Identity;
 use cweldrop::net::NetCmd;
+use cweldrop::settings::Settings;
 use cweldrop::{discovery, input, links, net, ui};
 
 #[derive(Parser, Debug)]
@@ -105,16 +108,15 @@ async fn main() -> Result<()> {
         EnableMouseCapture
     )
     .context("enter alt screen")?;
+    let picker = image_picker();
+    info!(protocol = ?picker.protocol_type(), font = ?picker.font_size(), "image protocol");
     let backend = CrosstermBackend::new(stdout);
     let mut term = Terminal::new(backend).context("terminal")?;
 
-    let result = run_ui(
-        &mut term,
-        App::new(username, actual_port).with_pubkey(identity.pubkey_hex()),
-        cmd_tx.clone(),
-        &mut evt_rx,
-    )
-    .await;
+    let app = App::new(username, actual_port)
+        .with_pubkey(identity.pubkey_hex())
+        .with_settings(Settings::load());
+    let result = run_ui(&mut term, app, cmd_tx.clone(), evt_tx, &mut evt_rx, picker).await;
 
     let _ = disable_raw_mode();
     let _ = execute!(
@@ -136,7 +138,9 @@ async fn run_ui<B: ratatui::backend::Backend>(
     term: &mut Terminal<B>,
     mut app: App,
     cmd_tx: mpsc::Sender<NetCmd>,
+    evt_tx: mpsc::Sender<AppEvent>,
     evt_rx: &mut mpsc::Receiver<AppEvent>,
+    picker: Picker,
 ) -> Result<()> {
     let mut keys = EventStream::new();
     term.draw(|f| ui::draw(f, &mut app))?;
@@ -187,11 +191,86 @@ async fn run_ui<B: ratatui::backend::Backend>(
             }
             _ = tokio::time::sleep(Duration::from_millis(500)) => {}
         }
+        for c in app.outbox.drain(..) {
+            if cmd_tx.send(c).await.is_err() {
+                error!("net cmd channel closed");
+                return Ok(());
+            }
+        }
         if let Some(url) = app.pending_open.take() {
             links::open(&url);
         }
+        if let Some(path) = app.pending_view.take() {
+            let (picker, evt_tx) = (picker.clone(), evt_tx.clone());
+            tokio::task::spawn_blocking(move || {
+                let result =
+                    decode_image(&path).map(|img| ImageProto(picker.new_resize_protocol(img)));
+                let _ = evt_tx.blocking_send(AppEvent::ImageDecoded { path, result });
+            });
+        }
+        if std::mem::take(&mut app.needs_clear) {
+            term.clear()?;
+        }
         term.draw(|f| ui::draw(f, &mut app))?;
     }
+}
+
+/// Choose how to draw images without querying the terminal over stdin.
+///
+/// `Picker::from_query_stdio` leaves a thread blocked on stdin when the
+/// terminal doesn't answer (e.g. inside tmux), which then swallows the user's
+/// first keystrokes. Instead: protocol from well-known env vars, cell size
+/// from the kernel's window size (TIOCGWINSZ), halfblocks otherwise.
+fn image_picker() -> Picker {
+    use ratatui_image::picker::ProtocolType;
+    let font = crossterm::terminal::window_size()
+        .ok()
+        .filter(|w| w.columns > 0 && w.rows > 0 && w.width > 0 && w.height > 0)
+        .map(|w| (w.width / w.columns, w.height / w.rows))
+        .filter(|&(fw, fh)| fw > 0 && fh > 0);
+    let mut picker = Picker::from_fontsize(font.unwrap_or((10, 20)));
+    let env = |k: &str| std::env::var(k).unwrap_or_default();
+    let term = env("TERM");
+    let program = env("TERM_PROGRAM");
+    let in_tmux = !env("TMUX").is_empty();
+    let proto = if in_tmux || font.is_none() {
+        // Graphics through tmux need passthrough config we can't verify, and
+        // without a pixel size the image can't be mapped onto cells.
+        ProtocolType::Halfblocks
+    } else if term.contains("kitty")
+        || !env("KITTY_WINDOW_ID").is_empty()
+        || program.eq_ignore_ascii_case("ghostty")
+        || term.contains("ghostty")
+    {
+        ProtocolType::Kitty
+    } else if program == "iTerm.app" || program == "WezTerm" {
+        ProtocolType::Iterm2
+    } else {
+        ProtocolType::Halfblocks
+    };
+    picker.set_protocol_type(proto);
+    picker
+}
+
+/// Decode an image for the viewer. Files come from peers, so cap dimensions
+/// and allocation to keep a crafted image from exhausting memory.
+fn decode_image(path: &PathBuf) -> std::result::Result<image::DynamicImage, String> {
+    let mut reader = image::ImageReader::open(path)
+        .map_err(|e| e.to_string())?
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(512 * 1024 * 1024);
+    reader.limits(limits);
+    let img = reader.decode().map_err(|e| e.to_string())?;
+    // Nothing on a terminal needs more than this; keeps re-encoding cheap.
+    Ok(if img.width() > 4096 || img.height() > 4096 {
+        img.thumbnail(4096, 4096)
+    } else {
+        img
+    })
 }
 
 fn default_nick() -> String {

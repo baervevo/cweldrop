@@ -9,7 +9,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::protocol::{read_frame, write_frame, Message};
-use super::PeerId;
+use super::transfer::Transfers;
+use super::{PeerCmd, PeerId};
 use crate::event::AppEvent;
 use crate::history_store::{self, Direction, StoredLine};
 use crate::identity::{self, Identity};
@@ -21,7 +22,7 @@ pub async fn run_peer(
     addr: SocketAddr,
     self_username: String,
     identity: Arc<Identity>,
-    mut out_rx: mpsc::Receiver<Message>,
+    mut out_rx: mpsc::Receiver<PeerCmd>,
     evt_tx: mpsc::Sender<AppEvent>,
     dialed: bool,
 ) {
@@ -206,11 +207,37 @@ pub async fn run_peer(
 
     // ---- Main loop ----
 
+    // Frames are read on their own task: `read_line` is not cancel-safe, so
+    // reading inside the select below could drop half a frame whenever an
+    // outgoing message won the race.
+    let (in_tx, mut in_rx) = mpsc::channel::<std::io::Result<Option<Message>>>(16);
+    let reader = tokio::spawn(async move {
+        loop {
+            let res = read_frame(&mut r).await;
+            let more = matches!(res, Ok(Some(_)));
+            if in_tx.send(res).await.is_err() || !more {
+                break;
+            }
+        }
+    });
+
+    let (chunk_tx, mut chunk_rx) = mpsc::channel::<Message>(4);
+    let mut xfer = Transfers::new(
+        id.clone(),
+        self_username.clone(),
+        remote_username.clone(),
+        authenticated_pubkey.clone(),
+        evt_tx.clone(),
+        chunk_tx,
+    );
+
     loop {
+        // Frames to write after handling this iteration's event.
+        let mut replies: Vec<Message> = Vec::new();
         tokio::select! {
-            res = read_frame(&mut r) => {
+            res = in_rx.recv() => {
                 match res {
-                    Ok(Some(msg)) => match msg {
+                    Some(Ok(Some(msg))) => match msg {
                         Message::Hello { .. } | Message::Auth { .. } => {
                             warn!(%addr, "unexpected handshake frame after handshake");
                         }
@@ -222,6 +249,7 @@ pub async fn run_peer(
                                     from: from.clone(),
                                     body: body.clone(),
                                     at: Utc::now(),
+                                    file: None,
                                 }) {
                                     warn!(error=%e, "history append (recv) failed");
                                 }
@@ -238,16 +266,28 @@ pub async fn run_peer(
                                 active,
                             }).await;
                         }
+                        Message::FileOffer { file_id, name, size } => {
+                            replies.extend(xfer.on_offer(file_id, name, size).await);
+                        }
+                        Message::FileAccept { file_id } => xfer.on_accept(file_id).await,
+                        Message::FileReject { file_id } => xfer.on_reject(file_id).await,
+                        Message::FileChunk { file_id, data } => {
+                            replies.extend(xfer.on_chunk(file_id, data).await);
+                        }
+                        Message::FileDone { file_id, sha256 } => {
+                            xfer.on_done(file_id, sha256).await;
+                        }
+                        Message::FileCancel { file_id } => xfer.on_cancel(file_id).await,
                         Message::Bye => {
                             info!(%addr, "peer said bye");
                             break;
                         }
                     },
-                    Ok(None) => {
+                    Some(Ok(None)) | None => {
                         info!(%addr, "peer closed");
                         break;
                     }
-                    Err(e) => {
+                    Some(Err(e)) => {
                         warn!(error=%e, %addr, "read error");
                         break;
                     }
@@ -255,7 +295,7 @@ pub async fn run_peer(
             }
             out = out_rx.recv() => {
                 match out {
-                    Some(msg) => {
+                    Some(PeerCmd::Send(msg)) => {
                         let is_bye = matches!(msg, Message::Bye);
                         let text_body = if let Message::Text { body } = &msg {
                             Some(body.clone())
@@ -272,18 +312,48 @@ pub async fn run_peer(
                                 from: self_username.clone(),
                                 body,
                                 at: Utc::now(),
+                                file: None,
                             }) {
                                 warn!(error=%e, "history append (sent) failed");
                             }
                         }
                         if is_bye { break; }
                     }
+                    Some(PeerCmd::SendFile { file_id, path, name, size }) => {
+                        replies.push(xfer.offer(file_id, path, name, size));
+                    }
+                    Some(PeerCmd::AcceptFile { file_id, dir }) => {
+                        replies.extend(xfer.accept(&file_id, &dir).await);
+                    }
+                    Some(PeerCmd::RejectFile { file_id }) => {
+                        replies.extend(xfer.reject(&file_id));
+                    }
                     None => break,
                 }
             }
+            Some(msg) = chunk_rx.recv() => {
+                if let Err(e) = write_frame(&mut w, &msg).await {
+                    warn!(error=%e, %addr, "write error");
+                    break;
+                }
+                xfer.on_frame_written(&msg).await;
+            }
+        }
+        let mut write_failed = false;
+        for msg in replies {
+            if let Err(e) = write_frame(&mut w, &msg).await {
+                warn!(error=%e, %addr, "write error");
+                write_failed = true;
+                break;
+            }
+        }
+        if write_failed {
+            break;
         }
     }
 
+    reader.abort();
+    xfer.shutdown().await;
     let _ = evt_tx
         .send(AppEvent::PeerDisconnected { id: id.clone() })
         .await;

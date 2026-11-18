@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use crate::net::PeerId;
 
@@ -48,4 +49,58 @@ pub enum AppEvent {
         id: PeerId,
         active: bool,
     },
+    /// Remote wants to send us a file; answer with `NetCmd::AcceptFile` or
+    /// `NetCmd::RejectFile`. `name` is already sanitised.
+    FileOffered {
+        id: PeerId,
+        file_id: String,
+        name: String,
+        size: u64,
+    },
+    /// Remote accepted our offer; chunks are flowing.
+    FileAccepted {
+        id: PeerId,
+        file_id: String,
+    },
+    /// Remote declined our offer.
+    FileRejected {
+        id: PeerId,
+        file_id: String,
+    },
+    /// Bytes moved so far, in either direction.
+    FileProgress {
+        id: PeerId,
+        file_id: String,
+        bytes: u64,
+    },
+    /// Our file was fully sent.
+    FileSent {
+        id: PeerId,
+        file_id: String,
+    },
+    /// An incoming file was verified and saved at `path`.
+    FileReceived {
+        id: PeerId,
+        file_id: String,
+        path: PathBuf,
+    },
+    FileFailed {
+        id: PeerId,
+        file_id: String,
+        error: String,
+    },
+    /// An image the user asked to view finished decoding (off the UI thread).
+    ImageDecoded {
+        path: PathBuf,
+        result: Result<ImageProto, String>,
+    },
+}
+
+/// A decoded image ready for the terminal graphics protocol.
+pub struct ImageProto(pub ratatui_image::protocol::StatefulProtocol);
+
+impl std::fmt::Debug for ImageProto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ImageProto")
+    }
 }

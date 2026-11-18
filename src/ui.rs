@@ -4,11 +4,12 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 
-use crate::app::{App, Focus, LinkRegion, PeerStatus};
+use crate::app::{App, ChatLine, FileInfo, FileState, Focus, LinkRegion, LinkTarget, PeerStatus};
+use crate::files;
 use crate::links;
 
 /// Style for links in chat. `link_regions` keys off it, so nothing else in
@@ -36,6 +37,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_peers(f, app, cols[0]);
     draw_right(f, app, cols[1]);
     draw_status(f, app, outer[1]);
+    if app.focus == Focus::Settings {
+        draw_settings(f, app, area);
+    }
+    if app.viewer.is_some() {
+        draw_viewer(f, app, outer[0]);
+    }
 }
 
 fn char_offset(s: &str, byte_cursor: usize) -> u16 {
@@ -128,7 +135,10 @@ fn draw_right(f: &mut Frame, app: &mut App, area: Rect) {
                             Style::default().fg(color).add_modifier(Modifier::BOLD),
                         ),
                     ];
-                    spans.extend(body_spans(&cl.body));
+                    match &cl.file {
+                        Some(file) => spans.extend(file_spans(file, is_me)),
+                        None => spans.extend(body_spans(&cl.body)),
+                    }
                     Line::from(spans)
                 })
                 .collect();
@@ -177,8 +187,12 @@ fn draw_right(f: &mut Frame, app: &mut App, area: Rect) {
     let scroll_from_top = max_scroll - app.chat_scroll;
     let chat = chat.scroll((scroll_from_top, 0));
     f.render_widget(chat, chat_area);
-    let urls = app.selected_chat_urls();
-    app.link_regions = link_regions(f.buffer_mut(), inner, &urls);
+    let targets = app
+        .selected_peer()
+        .and_then(|p| app.history.get(p.history_key()))
+        .map(|h| link_targets(h))
+        .unwrap_or_default();
+    app.link_regions = link_regions(f.buffer_mut(), inner, &targets);
 
     let input_area = rows[1];
     let (input_title, content, prefix_len, cursor_chars, is_active) = if app.focus == Focus::Command
@@ -249,7 +263,7 @@ fn is_link_cell(buf: &Buffer, x: u16, y: u16) -> bool {
 /// back together: a run that reaches the right edge continues at the start of
 /// the next row. Each fragment is matched against `urls` (all links in the
 /// chat) so a link partially scrolled out of view still opens in full.
-fn link_regions(buf: &Buffer, area: Rect, urls: &[String]) -> Vec<LinkRegion> {
+fn link_regions(buf: &Buffer, area: Rect, targets: &[(String, LinkTarget)]) -> Vec<LinkRegion> {
     /// One stitched link: `(y, x_start, x_end)` per row, plus its visible text.
     type Run = (Vec<(u16, u16, u16)>, String);
     let mut runs: Vec<Run> = Vec::new();
@@ -287,21 +301,180 @@ fn link_regions(buf: &Buffer, area: Rect, urls: &[String]) -> Vec<LinkRegion> {
 
     let mut out = Vec::new();
     for (cells, text) in runs {
-        let url = urls
+        let target = targets
             .iter()
-            .find(|u| u.as_str() == text || u.strip_prefix("https://") == Some(text.as_str()))
-            .or_else(|| urls.iter().find(|u| u.contains(text.as_str())))
-            .cloned()
-            .or_else(|| links::normalize(&text));
-        let Some(url) = url else { continue };
+            .find(|(shown, _)| *shown == text)
+            .or_else(|| {
+                targets
+                    .iter()
+                    .find(|(shown, _)| shown.contains(text.as_str()))
+            })
+            .map(|(_, t)| t.clone())
+            .or_else(|| links::normalize(&text).map(LinkTarget::Url));
+        let Some(target) = target else { continue };
         out.extend(cells.into_iter().map(|(y, x_start, x_end)| LinkRegion {
             y,
             x_start,
             x_end,
-            url: url.clone(),
+            target: target.clone(),
         }));
     }
     out
+}
+
+/// Every clickable thing in a chat as (text exactly as rendered, target).
+fn link_targets(history: &[ChatLine]) -> Vec<(String, LinkTarget)> {
+    let mut out = Vec::new();
+    for cl in history {
+        match &cl.file {
+            Some(f) => {
+                if let Some(path) = viewable(f) {
+                    out.push((f.name.clone(), LinkTarget::Image(path.clone())));
+                }
+            }
+            None => {
+                for r in links::find_urls(&cl.body) {
+                    if let Some(url) = links::normalize(&cl.body[r.clone()]) {
+                        out.push((cl.body[r].to_string(), LinkTarget::Url(url)));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Path to open in the viewer, if this transfer is a finished image.
+fn viewable(f: &FileInfo) -> Option<&std::path::PathBuf> {
+    f.path
+        .as_ref()
+        .filter(|_| f.state == FileState::Done && files::is_image(&f.name))
+}
+
+/// "📎 name (size) — state" for a file transfer line.
+fn file_spans(f: &FileInfo, is_me: bool) -> Vec<Span<'static>> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let icon = if files::is_image(&f.name) {
+        "🖼 "
+    } else {
+        "📎 "
+    };
+    let name_style = if viewable(f).is_some() {
+        link_style()
+    } else {
+        Style::default().add_modifier(Modifier::BOLD)
+    };
+    let pct = |b: u64| (b * 100).checked_div(f.size).unwrap_or(100);
+    let (state, style) = match &f.state {
+        FileState::Offered => ("waiting for them to accept…".to_string(), dim),
+        FileState::AwaitingDecision => (
+            ":accept or :reject".to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        FileState::Transferring(b) => (format!("{}%", pct(*b)), Style::default().fg(Color::Yellow)),
+        FileState::Done if viewable(f).is_some() => ("click or :view to open".to_string(), dim),
+        FileState::Done if is_me => ("sent".to_string(), dim),
+        FileState::Done => match &f.path {
+            Some(p) => (format!("saved to {}", p.display()), dim),
+            None => ("received".to_string(), dim),
+        },
+        FileState::Rejected => ("declined".to_string(), dim),
+        FileState::Failed(e) => (format!("failed: {e}"), Style::default().fg(Color::Red)),
+    };
+    vec![
+        Span::raw(icon),
+        Span::styled(f.name.clone(), name_style),
+        Span::styled(format!(" ({}) — ", files::human_size(f.size)), dim),
+        Span::styled(state, style),
+    ]
+}
+
+/// A `w`×`h` rect centred in `area` (clamped to fit).
+fn centered(area: Rect, w: u16, h: u16) -> Rect {
+    let w = w.min(area.width);
+    let h = h.min(area.height);
+    Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    }
+}
+
+fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
+    let popup = centered(area, 72, 9);
+    f.render_widget(Clear, popup);
+    let s = &app.settings;
+    let dir = match &app.settings_edit {
+        Some(buf) => format!("{buf}▏"),
+        None => s.download_dir.display().to_string(),
+    };
+    let rows = [
+        (
+            "Incoming files",
+            format!("‹ {} ›", s.incoming_files.label()),
+        ),
+        ("Max file size", format!("‹ {} MB ›", s.max_file_mb)),
+        ("Download folder", dir),
+    ];
+    let mut lines: Vec<Line> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, (label, value))| {
+            let sel = i == app.settings_sel;
+            let style = if sel {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            Line::from(vec![
+                Span::styled(format!(" {label:<16} "), style.add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" {value} "), style),
+            ])
+        })
+        .collect();
+    lines.push(Line::raw(""));
+    let hint = if app.settings_edit.is_some() {
+        "type a path · Enter save · Esc cancel"
+    } else {
+        "↑/↓ select · ←/→/Enter change · Esc close (saved automatically)"
+    };
+    lines.push(Line::from(Span::styled(
+        hint,
+        Style::default().fg(Color::DarkGray),
+    )));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("settings")
+        .border_style(Style::default().fg(Color::Magenta));
+    f.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
+fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
+    let Some(v) = app.viewer.as_mut() else { return };
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!("{} — Esc to close", v.name))
+        .border_style(Style::default().fg(Color::Magenta));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    match (&mut v.image, &v.error) {
+        (_, Some(e)) => f.render_widget(
+            Paragraph::new(format!("cannot show image: {e}"))
+                .style(Style::default().fg(Color::Red)),
+            inner,
+        ),
+        (Some(img), None) => {
+            f.render_stateful_widget(ratatui_image::StatefulImage::default(), inner, &mut img.0)
+        }
+        (None, None) => f.render_widget(
+            Paragraph::new("loading…").style(Style::default().fg(Color::DarkGray)),
+            inner,
+        ),
+    }
 }
 
 /// A dim, italic "<name> is typing…" line with dots that animate across
@@ -341,7 +514,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         .count();
     let total = app.peers.len();
     let base = format!(
-        "{} | port {} | peers: {total} ({online} online) | Tab switch, : command, Ctrl-C quit",
+        "{} | port {} | peers: {total} ({online} online) | Tab switch, : command, :settings, Ctrl-C quit",
         app.self_username, app.self_port
     );
     let line = if app.status_msg.is_empty() {
@@ -374,11 +547,7 @@ mod tests {
             "p".into(),
             bodies
                 .iter()
-                .map(|b| ChatLine {
-                    from: "them".into(),
-                    body: (*b).into(),
-                    at: std::time::SystemTime::now(),
-                })
+                .map(|b| ChatLine::text("them".into(), (*b).into()))
                 .collect(),
         );
         app
@@ -404,7 +573,7 @@ mod tests {
         render(&mut app, 100, 10);
         assert!(!app.link_regions.is_empty());
         let r = app.link_regions[0].clone();
-        assert_eq!(r.url, "https://example.com");
+        assert_eq!(r.target, LinkTarget::Url("https://example.com".into()));
         assert_eq!(r.x_end - r.x_start, "https://example.com".len() as u16);
         app.click(r.x_start, r.y);
         assert_eq!(app.pending_open.as_deref(), Some("https://example.com"));
@@ -418,17 +587,91 @@ mod tests {
         render(&mut app, 58, 12);
         let rows: std::collections::BTreeSet<u16> = app.link_regions.iter().map(|r| r.y).collect();
         assert!(rows.len() >= 3, "regions: {:?}", app.link_regions);
-        assert!(app.link_regions.iter().all(|r| r.url == url));
+        assert!(app
+            .link_regions
+            .iter()
+            .all(|r| r.target == LinkTarget::Url(url.into())));
     }
 
     #[test]
     fn separate_links_stay_separate() {
         let mut app = app_with_messages(&["https://a.com https://b.com", "www.c.com"]);
         render(&mut app, 100, 10);
-        let urls: Vec<&str> = app.link_regions.iter().map(|r| r.url.as_str()).collect();
-        assert_eq!(
-            urls,
-            vec!["https://a.com", "https://b.com", "https://www.c.com"]
+        let urls: Vec<LinkTarget> = app.link_regions.iter().map(|r| r.target.clone()).collect();
+        let want: Vec<LinkTarget> = ["https://a.com", "https://b.com", "https://www.c.com"]
+            .into_iter()
+            .map(|u| LinkTarget::Url(u.into()))
+            .collect();
+        assert_eq!(urls, want);
+    }
+
+    fn file_line(name: &str, state: FileState) -> ChatLine {
+        ChatLine {
+            file: Some(FileInfo {
+                file_id: "f1".into(),
+                name: name.into(),
+                size: 2048,
+                path: Some(format!("/tmp/{name}").into()),
+                state,
+            }),
+            ..ChatLine::text("them".into(), name.into())
+        }
+    }
+
+    fn screen_text(app: &mut App, w: u16, h: u16) -> String {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, app)).unwrap();
+        let buf = term.backend().buffer();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn finished_image_name_opens_viewer() {
+        let mut app = app_with_messages(&[]);
+        app.history
+            .get_mut("p")
+            .unwrap()
+            .push(file_line("cat.png", FileState::Done));
+        let text = screen_text(&mut app, 100, 10);
+        assert!(
+            text.contains("cat.png (2.0 KB) — click or :view to open"),
+            "{text}"
         );
+        let r = app
+            .link_regions
+            .first()
+            .expect("image name is clickable")
+            .clone();
+        assert_eq!(r.target, LinkTarget::Image("/tmp/cat.png".into()));
+        app.click(r.x_start, r.y);
+        assert_eq!(app.pending_view, Some("/tmp/cat.png".into()));
+        assert!(app.viewer.is_some());
+        let text = screen_text(&mut app, 100, 10);
+        assert!(text.contains("cat.png — Esc to close"), "{text}");
+    }
+
+    #[test]
+    fn pending_and_non_image_files_are_not_clickable() {
+        let mut app = app_with_messages(&[]);
+        let h = app.history.get_mut("p").unwrap();
+        h.push(file_line("cat.png", FileState::AwaitingDecision));
+        h.push(file_line("notes.txt", FileState::Done));
+        let text = screen_text(&mut app, 100, 10);
+        assert!(text.contains(":accept or :reject"), "{text}");
+        assert!(text.contains("saved to /tmp/notes.txt"), "{text}");
+        assert!(app.link_regions.is_empty());
+    }
+
+    #[test]
+    fn settings_panel_renders_values() {
+        let mut app = app_with_messages(&[]);
+        app.run_command("settings");
+        let text = screen_text(&mut app, 100, 20);
+        assert!(text.contains("Incoming files"), "{text}");
+        assert!(text.contains("‹ ask ›"), "{text}");
+        assert!(text.contains("‹ 100 MB ›"), "{text}");
     }
 }

@@ -2,9 +2,11 @@ pub mod client;
 pub mod peer;
 pub mod protocol;
 pub mod server;
+pub mod transfer;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -20,15 +22,63 @@ pub type PeerId = String;
 
 #[derive(Debug)]
 pub enum NetCmd {
-    Connect { id: PeerId, addr: SocketAddr },
-    SendText { id: PeerId, body: String },
-    SendTyping { id: PeerId, active: bool },
-    Disconnect { id: PeerId },
+    Connect {
+        id: PeerId,
+        addr: SocketAddr,
+    },
+    SendText {
+        id: PeerId,
+        body: String,
+    },
+    SendTyping {
+        id: PeerId,
+        active: bool,
+    },
+    /// Offer a local file to the peer.
+    SendFile {
+        id: PeerId,
+        file_id: String,
+        path: PathBuf,
+        name: String,
+        size: u64,
+    },
+    /// Accept a pending offer, saving into `dir`.
+    AcceptFile {
+        id: PeerId,
+        file_id: String,
+        dir: PathBuf,
+    },
+    RejectFile {
+        id: PeerId,
+        file_id: String,
+    },
+    Disconnect {
+        id: PeerId,
+    },
     Shutdown,
 }
 
+/// Instructions from the supervisor to one peer task.
+#[derive(Debug)]
+pub enum PeerCmd {
+    Send(Message),
+    SendFile {
+        file_id: String,
+        path: PathBuf,
+        name: String,
+        size: u64,
+    },
+    AcceptFile {
+        file_id: String,
+        dir: PathBuf,
+    },
+    RejectFile {
+        file_id: String,
+    },
+}
+
 struct PeerHandle {
-    tx: mpsc::Sender<Message>,
+    tx: mpsc::Sender<PeerCmd>,
 }
 
 pub struct NetSupervisor {
@@ -82,7 +132,7 @@ impl NetSupervisor {
                 let username = self.username.clone();
                 let identity = Arc::clone(&self.identity);
                 let evt_tx = self.evt_tx.clone();
-                let (out_tx, out_rx) = mpsc::channel::<Message>(64);
+                let (out_tx, out_rx) = mpsc::channel::<PeerCmd>(64);
                 self.peers.insert(id.clone(), PeerHandle { tx: out_tx });
                 tokio::spawn(async move {
                     match TcpStream::connect(addr).await {
@@ -105,18 +155,46 @@ impl NetSupervisor {
                 });
             }
             NetCmd::SendText { id, body } => {
-                if let Some(h) = self.peers.get(&id) {
-                    let _ = h.tx.send(Message::text(body)).await;
-                }
+                self.to_peer(&id, PeerCmd::Send(Message::text(body))).await;
             }
             NetCmd::SendTyping { id, active } => {
-                if let Some(h) = self.peers.get(&id) {
-                    let _ = h.tx.send(Message::Typing { active }).await;
+                self.to_peer(&id, PeerCmd::Send(Message::Typing { active }))
+                    .await;
+            }
+            NetCmd::SendFile {
+                id,
+                file_id,
+                path,
+                name,
+                size,
+            } => {
+                let cmd = PeerCmd::SendFile {
+                    file_id: file_id.clone(),
+                    path,
+                    name,
+                    size,
+                };
+                if !self.to_peer(&id, cmd).await {
+                    let _ = self
+                        .evt_tx
+                        .send(AppEvent::FileFailed {
+                            id,
+                            file_id,
+                            error: "peer not connected".into(),
+                        })
+                        .await;
                 }
+            }
+            NetCmd::AcceptFile { id, file_id, dir } => {
+                self.to_peer(&id, PeerCmd::AcceptFile { file_id, dir })
+                    .await;
+            }
+            NetCmd::RejectFile { id, file_id } => {
+                self.to_peer(&id, PeerCmd::RejectFile { file_id }).await;
             }
             NetCmd::Disconnect { id } => {
                 if let Some(h) = self.peers.remove(&id) {
-                    let _ = h.tx.send(Message::Bye).await;
+                    let _ = h.tx.send(PeerCmd::Send(Message::Bye)).await;
                 }
             }
             NetCmd::Shutdown => {}
@@ -125,12 +203,20 @@ impl NetSupervisor {
         self.peers.retain(|_, h| !h.tx.is_closed());
     }
 
+    /// Forward to a peer task; false if there's no live task for `id`.
+    async fn to_peer(&self, id: &str, cmd: PeerCmd) -> bool {
+        match self.peers.get(id) {
+            Some(h) => h.tx.send(cmd).await.is_ok(),
+            None => false,
+        }
+    }
+
     async fn spawn_inbound(&mut self, stream: TcpStream, addr: SocketAddr) {
         let id = format!("inbound:{addr}");
         if self.peers.contains_key(&id) {
             return;
         }
-        let (out_tx, out_rx) = mpsc::channel::<Message>(64);
+        let (out_tx, out_rx) = mpsc::channel::<PeerCmd>(64);
         self.peers.insert(id.clone(), PeerHandle { tx: out_tx });
         let evt_tx = self.evt_tx.clone();
         let username = self.username.clone();

@@ -27,6 +27,32 @@ pub enum Message {
     Typing {
         active: bool,
     },
+    /// Sender proposes a file. Nothing is transferred until `FileAccept`.
+    FileOffer {
+        file_id: String,
+        name: String,
+        size: u64,
+    },
+    FileAccept {
+        file_id: String,
+    },
+    FileReject {
+        file_id: String,
+    },
+    /// Base64 payload of the next sequential chunk.
+    FileChunk {
+        file_id: String,
+        data: String,
+    },
+    /// All chunks sent; `sha256` (hex) of the whole file for verification.
+    FileDone {
+        file_id: String,
+        sha256: String,
+    },
+    /// Either side aborts a pending or in-flight transfer.
+    FileCancel {
+        file_id: String,
+    },
     Bye,
 }
 
@@ -127,6 +153,39 @@ mod tests {
         assert_eq!(s, "{\"kind\":\"typing\",\"active\":true}");
         let back: Message = serde_json::from_str(&s).unwrap();
         assert_eq!(m, back);
+    }
+
+    #[test]
+    fn file_frames_roundtrip() {
+        let frames = [
+            Message::FileOffer {
+                file_id: "ab".into(),
+                name: "a.png".into(),
+                size: 3,
+            },
+            Message::FileAccept {
+                file_id: "ab".into(),
+            },
+            Message::FileReject {
+                file_id: "ab".into(),
+            },
+            Message::FileChunk {
+                file_id: "ab".into(),
+                data: "AAEC".into(),
+            },
+            Message::FileDone {
+                file_id: "ab".into(),
+                sha256: "00".into(),
+            },
+            Message::FileCancel {
+                file_id: "ab".into(),
+            },
+        ];
+        for m in frames {
+            let s = serde_json::to_string(&m).unwrap();
+            assert!(s.starts_with("{\"kind\":\"file_"), "{s}");
+            assert_eq!(serde_json::from_str::<Message>(&s).unwrap(), m);
+        }
     }
 
     #[test]

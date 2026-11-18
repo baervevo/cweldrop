@@ -1,10 +1,12 @@
 pub mod app;
 pub mod discovery;
 pub mod event;
+pub mod files;
 pub mod history_store;
 pub mod identity;
 pub mod input;
 pub mod links;
 pub mod net;
 pub mod notify;
+pub mod settings;
 pub mod ui;

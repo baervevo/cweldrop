@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{App, Focus, PeerStatus};
+use crate::app::{App, Focus, PeerStatus, SETTINGS_ROWS};
 use crate::net::NetCmd;
 
 /// Handle a keypress; return any NetCmds to emit.
@@ -11,8 +11,16 @@ pub fn handle_key(app: &mut App, k: KeyEvent) -> Vec<NetCmd> {
         return Vec::new();
     }
 
+    // The image viewer is modal: any of these close it, other keys are ignored.
+    if app.viewer.is_some() {
+        if matches!(k.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
+            app.close_viewer();
+        }
+        return Vec::new();
+    }
+
     // Scrollback (works in any non-Command focus).
-    if app.focus != Focus::Command {
+    if !matches!(app.focus, Focus::Command | Focus::Settings) {
         match k.code {
             KeyCode::PageUp => {
                 app.chat_scroll = app.chat_scroll.saturating_add(5);
@@ -30,6 +38,37 @@ pub fn handle_key(app: &mut App, k: KeyEvent) -> Vec<NetCmd> {
         Focus::Command => handle_command(app, k),
         Focus::Peers => handle_peers(app, k),
         Focus::Input => handle_input(app, k),
+        Focus::Settings => {
+            handle_settings(app, k);
+            Vec::new()
+        }
+    }
+}
+
+fn handle_settings(app: &mut App, k: KeyEvent) {
+    if let Some(buf) = app.settings_edit.as_mut() {
+        match k.code {
+            KeyCode::Esc => app.settings_edit = None,
+            KeyCode::Enter => app.settings_commit_edit(),
+            KeyCode::Backspace => {
+                buf.pop();
+            }
+            KeyCode::Char(c) => buf.push(c),
+            _ => {}
+        }
+        return;
+    }
+    match k.code {
+        KeyCode::Esc | KeyCode::Char('q') => app.focus = Focus::Input,
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.settings_sel = (app.settings_sel + SETTINGS_ROWS - 1) % SETTINGS_ROWS;
+        }
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+            app.settings_sel = (app.settings_sel + 1) % SETTINGS_ROWS;
+        }
+        KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ' | 'l') => app.settings_adjust(true),
+        KeyCode::Left | KeyCode::Char('h') => app.settings_adjust(false),
+        _ => {}
     }
 }
 

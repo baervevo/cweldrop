@@ -56,6 +56,10 @@ cweldrop --port 7422 --nick b
 | `:nick <name>` | Change your username                |
 | `:d`           | Disconnect from selected peer       |
 | `:open [n]`    | Open the newest (or n-th newest) link in this chat |
+| `:send <path>` | Offer a file to the selected peer   |
+| `:accept [n]` / `:reject [n]` | Answer the newest (or n-th newest) incoming file offer |
+| `:view [n]`    | Show the newest (or n-th newest) image in this chat (also: click its name) |
+| `:settings`    | Settings panel: incoming file policy (ask / auto-accept / reject), size cap, download folder |
 | `:q`           | Quit                                |
 
 ## Wire protocol
@@ -66,6 +70,18 @@ Newline-delimited JSON frames over a single TCP connection:
 {"kind":"hello","username":"alice","version":"0.1.0"}
 {"kind":"text","body":"hello there"}
 {"kind":"bye"}
+```
+
+File transfer (receiver must answer the offer before any data flows; chunks
+are 32 KiB base64 and interleave with chat; the receiver checks size and
+SHA-256 before moving the file out of a hidden `.part` file):
+
+```
+{"kind":"file_offer","file_id":"9f2c…","name":"cat.png","size":48213}
+{"kind":"file_accept","file_id":"9f2c…"}        // or file_reject
+{"kind":"file_chunk","file_id":"9f2c…","data":"iVBORw0K…"}
+{"kind":"file_done","file_id":"9f2c…","sha256":"…"}
+{"kind":"file_cancel","file_id":"9f2c…"}        // either side, any time
 ```
 
 Both sides send `hello` immediately on connect; only then is the peer marked

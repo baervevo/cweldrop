@@ -29,6 +29,10 @@ dirs = "5"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 notify-rust = "4"
 unicode-width = "0.2"
+ratatui-image = { version = "8.1.1", default-features = false, features = ["crossterm"] }
+base64 = "0.22"
+sha2 = "0.10"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 
 [profile.release]
 lto = "thin"

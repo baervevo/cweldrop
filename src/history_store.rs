@@ -21,6 +21,16 @@ pub struct StoredLine {
     pub from: String,
     pub body: String,
     pub at: DateTime<Utc>,
+    /// Set for completed file transfers: where the file lives on this machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<StoredFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredFile {
+    pub name: String,
+    pub size: u64,
+    pub path: PathBuf,
 }
 
 pub fn history_root() -> Result<PathBuf> {
@@ -111,12 +121,18 @@ mod tests {
             from: "me".into(),
             body: "hi".into(),
             at: Utc::now(),
+            file: None,
         };
         let l2 = StoredLine {
             dir: Direction::Recv,
             from: "you".into(),
             body: "hey".into(),
             at: Utc::now(),
+            file: Some(StoredFile {
+                name: "a.png".into(),
+                size: 3,
+                path: "/tmp/a.png".into(),
+            }),
         };
         append_in(&root, pk, &l1).unwrap();
         append_in(&root, pk, &l2).unwrap();
@@ -126,6 +142,8 @@ mod tests {
         assert_eq!(got[1].body, "hey");
         assert!(matches!(got[0].dir, Direction::Sent));
         assert!(matches!(got[1].dir, Direction::Recv));
+        assert_eq!(got[0].file, None);
+        assert_eq!(got[1].file.as_ref().map(|f| f.size), Some(3));
         let _ = std::fs::remove_dir_all(&root);
     }
 
