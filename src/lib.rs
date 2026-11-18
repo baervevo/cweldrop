@@ -3,6 +3,7 @@ pub mod chain;
 pub mod commands;
 pub mod discovery;
 pub mod event;
+pub mod file_search;
 pub mod files;
 pub mod history_store;
 pub mod identity;

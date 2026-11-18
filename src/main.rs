@@ -205,6 +205,13 @@ async fn run_ui<B: ratatui::backend::Backend>(
         if let Some(url) = app.pending_open.take() {
             links::open(&url);
         }
+        if let Some(root) = app.pending_index.take() {
+            let evt_tx = evt_tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let index = cweldrop::file_search::index(&root);
+                let _ = evt_tx.blocking_send(AppEvent::FileIndexed { index });
+            });
+        }
         if let Some(path) = app.pending_view.take() {
             let page = app.viewer.as_ref().map_or(1, |v| v.page);
             let (picker, evt_tx) = (picker.clone(), evt_tx.clone());

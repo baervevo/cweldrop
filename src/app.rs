@@ -288,6 +288,17 @@ pub struct App {
     pub files_sel: usize,
     /// Highlighted suggestion in the command hint panel.
     pub cmd_sel: usize,
+    /// Folder `:send` searches when no directory is typed.
+    pub cwd: PathBuf,
+    /// Indexed folders for the `:send` file search (cleared on leaving the
+    /// command line, so new files show up next time).
+    file_indexes: HashMap<PathBuf, Arc<crate::file_search::FileIndex>>,
+    /// A folder the main loop should index.
+    pub pending_index: Option<PathBuf>,
+    index_in_flight: Option<PathBuf>,
+    /// What the current `:send` argument searches, and the best matches.
+    pub file_scope: Option<crate::file_search::Scope>,
+    pub file_hits: Vec<crate::file_search::Hit>,
     /// NetCmds produced while handling events; drained by the main loop.
     pub outbox: Vec<NetCmd>,
     pub viewer: Option<Viewer>,
@@ -344,6 +355,12 @@ impl App {
             settings_edit: None,
             files_sel: 0,
             cmd_sel: 0,
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            file_indexes: HashMap::new(),
+            pending_index: None,
+            index_in_flight: None,
+            file_scope: None,
+            file_hits: Vec::new(),
             outbox: Vec::new(),
             viewer: None,
             pending_view: None,
@@ -893,6 +910,14 @@ impl App {
                     }
                 }
             }
+            AppEvent::FileIndexed { index } => {
+                if self.index_in_flight.as_ref() == Some(&index.root) {
+                    self.index_in_flight = None;
+                }
+                self.file_indexes
+                    .insert(index.root.clone(), Arc::new(index));
+                self.refresh_file_search();
+            }
             AppEvent::ViewerLoaded { path, page, result } => {
                 // Ignore a stale page if the user already flipped past it.
                 if let Some(v) = self
@@ -1391,9 +1416,60 @@ impl App {
         crate::commands::lookup(word.trim())
     }
 
+    /// The argument of a `:send` being typed, if that's what's on the line.
+    fn send_arg(&self) -> Option<&str> {
+        let (word, rest) = self.command.split_once(' ')?;
+        matches!(word, "send" | "f").then(|| rest.trim_start())
+    }
+
+    /// Recompute the `:send` file matches after the line or index changed,
+    /// asking the main loop to index the folder if needed.
+    pub fn refresh_file_search(&mut self) {
+        let Some(arg) = self.send_arg() else {
+            self.file_scope = None;
+            self.file_hits.clear();
+            return;
+        };
+        let scope = crate::file_search::scope(arg, &self.cwd);
+        match self.file_indexes.get(&scope.base) {
+            Some(idx) => self.file_hits = crate::file_search::search(idx, &scope.query, 50),
+            None => {
+                self.file_hits.clear();
+                if self.index_in_flight.as_ref() != Some(&scope.base) {
+                    self.index_in_flight = Some(scope.base.clone());
+                    self.pending_index = Some(scope.base.clone());
+                }
+            }
+        }
+        if self.file_scope.as_ref() != Some(&scope) {
+            self.cmd_sel = 0;
+        }
+        self.file_scope = Some(scope);
+    }
+
+    /// Index status for the `:send` panel: (files indexed, truncated), or
+    /// `None` while indexing.
+    pub fn file_index_info(&self) -> Option<(usize, bool)> {
+        let scope = self.file_scope.as_ref()?;
+        self.file_indexes
+            .get(&scope.base)
+            .map(|i| (i.paths.len(), i.truncated))
+    }
+
+    /// Leaving the command line: forget indexes so the next search is fresh.
+    pub fn reset_file_search(&mut self) {
+        self.file_indexes.clear();
+        self.file_scope = None;
+        self.file_hits.clear();
+    }
+
     /// Move the suggestion highlight by `delta`, wrapping.
     pub fn command_move(&mut self, delta: i32) {
-        let n = self.command_suggestions().len() as i32;
+        let n = if self.file_scope.is_some() {
+            self.file_hits.len() as i32
+        } else {
+            self.command_suggestions().len() as i32
+        };
         if n > 0 {
             self.cmd_sel = (self.cmd_sel as i32 + delta).rem_euclid(n) as usize;
         }
@@ -1401,6 +1477,16 @@ impl App {
 
     /// Replace the typed word with the highlighted command (Tab).
     pub fn command_complete(&mut self) -> bool {
+        if let Some(scope) = self.file_scope.clone() {
+            let Some(hit) = self.file_hits.get(self.cmd_sel) else {
+                return false;
+            };
+            let word = self.command.split(' ').next().unwrap_or("send").to_string();
+            self.command = format!("{word} {}{}", scope.prefix, hit.path);
+            self.command_cursor = self.command.len();
+            self.refresh_file_search();
+            return true;
+        }
         let Some(s) = self.command_suggestions().into_iter().nth(self.cmd_sel) else {
             return false;
         };
@@ -1418,6 +1504,15 @@ impl App {
     /// otherwise take the highlighted suggestion, running it unless it
     /// still needs an argument.
     pub fn command_enter(&mut self) -> Vec<NetCmd> {
+        // `:send <query>`: send the typed path if it's a file, else the pick.
+        if let Some(arg) = self.send_arg() {
+            let typed = crate::file_search::scope(arg, &self.cwd);
+            let typed_path = typed.base.join(&typed.query);
+            if !(typed_path.is_file() && !typed.query.is_empty()) && !self.command_complete() {
+                self.status_msg = "no matching file".into();
+                return Vec::new();
+            }
+        }
         let word = self.command.split_whitespace().next().unwrap_or("");
         let exact = crate::commands::lookup(word).is_some();
         if !exact && !word.is_empty() && self.command_complete() {
@@ -1426,10 +1521,19 @@ impl App {
                 return Vec::new(); // stay on the line to type the argument
             }
         }
-        let line = std::mem::take(&mut self.command);
+        let mut line = std::mem::take(&mut self.command);
         self.command_cursor = 0;
         self.cmd_sel = 0;
         self.focus = Focus::Input;
+        // Relative :send paths are relative to the search folder.
+        if let Some(rest) = line
+            .strip_prefix("send ")
+            .or_else(|| line.strip_prefix("f "))
+        {
+            let s = crate::file_search::scope(rest.trim(), &self.cwd);
+            line = format!("send {}", s.base.join(&s.query).display());
+        }
+        self.reset_file_search();
         self.run_command(&line)
     }
 
@@ -2504,6 +2608,71 @@ mod tests {
         // Text has no pages: the key falls back to scrolling.
         app.viewer.as_mut().unwrap().content = Some(Content::Text(Default::default()));
         assert!(!app.viewer_page(1));
+    }
+
+    /// Fuzzy file search on `:send`: index, pick, send.
+    #[test]
+    fn send_fuzzy_file_search() {
+        let root = std::env::temp_dir().join(format!("cweldrop-send-fs-{}", rand::random::<u64>()));
+        for f in ["photos/cat.png", "docs/report.pdf", "category/readme.md"] {
+            let p = root.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"12345").unwrap();
+        }
+        let mut app = App::new("me".into(), 7421);
+        online_peer(&mut app, "p");
+        app.cwd = root.clone();
+        typed(&mut app, "send cat");
+        app.refresh_file_search();
+        assert_eq!(
+            app.pending_index.take(),
+            Some(root.clone()),
+            "index requested"
+        );
+        app.refresh_file_search();
+        assert!(
+            app.pending_index.is_none(),
+            "not requested twice while in flight"
+        );
+        app.on_event(AppEvent::FileIndexed {
+            index: crate::file_search::index(&root),
+        });
+        assert_eq!(app.file_hits[0].path, "photos/cat.png");
+        assert_eq!(app.file_index_info(), Some((3, false)));
+
+        // Enter sends the top match (the typed text isn't a file).
+        let cmds = app.command_enter();
+        match &cmds[..] {
+            [NetCmd::SendFile { path, name, .. }] => {
+                assert_eq!(name, "cat.png");
+                assert!(path.ends_with("photos/cat.png"));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(app.file_scope.is_none(), "search state reset");
+
+        // Folder part narrows the search; Tab completes; arrows pick.
+        typed(&mut app, "send docs/");
+        app.refresh_file_search();
+        let base = app.pending_index.take().unwrap();
+        assert_eq!(base, root.join("docs/"));
+        app.on_event(AppEvent::FileIndexed {
+            index: crate::file_search::index(&base),
+        });
+        assert!(app.command_complete());
+        assert_eq!(app.command, "send docs/report.pdf");
+        let cmds = app.command_enter();
+        assert!(matches!(&cmds[..], [NetCmd::SendFile { name, .. }] if name == "report.pdf"));
+
+        // Nothing matches: stay on the line.
+        typed(&mut app, "send zzzz");
+        app.refresh_file_search();
+        app.on_event(AppEvent::FileIndexed {
+            index: crate::file_search::index(&root),
+        });
+        assert!(app.command_enter().is_empty());
+        assert_eq!(app.focus, Focus::Command);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

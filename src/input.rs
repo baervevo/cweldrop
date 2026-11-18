@@ -107,6 +107,7 @@ fn handle_command(app: &mut App, k: KeyEvent) -> Vec<NetCmd> {
             app.command.clear();
             app.command_cursor = 0;
             app.focus = Focus::Input;
+            app.reset_file_search();
             Vec::new()
         }
         KeyCode::Enter => app.command_enter(),
@@ -128,6 +129,7 @@ fn handle_command(app: &mut App, k: KeyEvent) -> Vec<NetCmd> {
         }
         KeyCode::Tab => {
             app.command_complete();
+            app.refresh_file_search();
             Vec::new()
         }
         KeyCode::Left => {
@@ -149,16 +151,19 @@ fn handle_command(app: &mut App, k: KeyEvent) -> Vec<NetCmd> {
         KeyCode::Backspace => {
             delete_before_cursor(&mut app.command, &mut app.command_cursor);
             app.cmd_sel = 0;
+            app.refresh_file_search();
             Vec::new()
         }
         KeyCode::Delete => {
             delete_at_cursor(&mut app.command, app.command_cursor);
             app.cmd_sel = 0;
+            app.refresh_file_search();
             Vec::new()
         }
         KeyCode::Char(c) => {
             insert_at_cursor(&mut app.command, &mut app.command_cursor, c);
             app.cmd_sel = 0;
+            app.refresh_file_search();
             Vec::new()
         }
         _ => Vec::new(),

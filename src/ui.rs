@@ -531,7 +531,53 @@ fn draw_command_hints(f: &mut Frame, app: &App, input: Rect) {
     let suggestions = app.command_suggestions();
     let sel = app.cmd_sel.min(suggestions.len().saturating_sub(1));
     let max_rows = 10usize;
-    if let Some(spec) = app.command_signature() {
+    let mut title = "commands".to_string();
+    if let Some(scope) = &app.file_scope {
+        let base = scope.base.display().to_string();
+        title = match app.file_index_info() {
+            None => format!("files in {base} — indexing…"),
+            Some((n, true)) => {
+                format!("files in {base} — first {n} indexed · type a folder/ to narrow")
+            }
+            Some((n, false)) => {
+                format!("files in {base} — {n} indexed · Tab complete · Enter send")
+            }
+        };
+        let sel = app.cmd_sel.min(app.file_hits.len().saturating_sub(1));
+        let first = sel.saturating_sub(max_rows - 1);
+        if app.file_hits.is_empty() && app.file_index_info().is_some() {
+            lines.push(Line::from(Span::styled("no matching file", dim)));
+        }
+        for (i, hit) in app.file_hits.iter().enumerate().skip(first).take(max_rows) {
+            let base_style = if i == sel {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            let name_start = hit.path.rfind('/').map_or(0, |p| p + 1);
+            let name_char = hit.path[..name_start].chars().count();
+            let mut spans = vec![Span::styled(
+                format!(" {}", scope.prefix),
+                base_style.fg(Color::DarkGray),
+            )];
+            for (ci, ch) in hit.path.chars().enumerate() {
+                let mut st = if ci < name_char {
+                    base_style.fg(Color::Gray)
+                } else {
+                    base_style.add_modifier(Modifier::BOLD)
+                };
+                if hit.hits.contains(&ci) {
+                    st = st.fg(Color::Yellow);
+                }
+                spans.push(Span::styled(ch.to_string(), st));
+            }
+            spans.push(Span::styled(" ", base_style));
+            lines.push(Line::from(spans));
+        }
+        if lines.is_empty() {
+            lines.push(Line::from(Span::styled("indexing…", dim)));
+        }
+    } else if let Some(spec) = app.command_signature() {
         lines.push(Line::from(vec![
             Span::styled(
                 format!(":{} ", spec.name),
@@ -582,7 +628,13 @@ fn draw_command_hints(f: &mut Frame, app: &App, input: Rect) {
             lines.push(Line::from(spans));
         }
     }
-    let width = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 2;
+    let width = lines
+        .iter()
+        .map(|l| l.width() as u16)
+        .max()
+        .unwrap_or(0)
+        .max(title.chars().count() as u16 + 2)
+        + 2;
     let height = lines.len() as u16 + 2;
     let width = width.min(input.width.max(20));
     let height = height.min(input.y);
@@ -596,11 +648,9 @@ fn draw_command_hints(f: &mut Frame, app: &App, input: Rect) {
         height,
     };
     f.render_widget(Clear, popup);
-    let title = if app.command_signature().is_some() {
-        "usage"
-    } else {
-        "commands"
-    };
+    if app.file_scope.is_none() && app.command_signature().is_some() {
+        title = "usage".to_string();
+    }
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
@@ -971,6 +1021,27 @@ mod tests {
         assert!(text.contains(":send <path>"), "{text}");
         app.command = "xyzzy".into();
         assert!(screen_text(&mut app, 120, 30).contains("no matching command"));
+    }
+
+    #[test]
+    fn send_panel_lists_matching_files() {
+        let mut app = app_with_messages(&[]);
+        let root = std::env::temp_dir().join(format!("cweldrop-ui-fs-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(root.join("photos")).unwrap();
+        std::fs::write(root.join("photos/cat.png"), b"x").unwrap();
+        app.cwd = root.clone();
+        app.focus = Focus::Command;
+        app.command = "send ca".into();
+        app.refresh_file_search();
+        assert!(screen_text(&mut app, 120, 30).contains("indexing"));
+        let root_idx = app.pending_index.take().unwrap();
+        app.on_event(crate::event::AppEvent::FileIndexed {
+            index: crate::file_search::index(&root_idx),
+        });
+        let text = screen_text(&mut app, 120, 30);
+        assert!(text.contains("photos/cat.png"), "{text}");
+        assert!(text.contains("1 indexed"), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

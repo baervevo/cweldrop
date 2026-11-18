@@ -109,6 +109,10 @@ pub enum AppEvent {
         file_id: String,
         error: String,
     },
+    /// A folder finished indexing for the `:send` file search.
+    FileIndexed {
+        index: crate::file_search::FileIndex,
+    },
     /// A file the user asked to view finished loading (off the UI thread).
     ViewerLoaded {
         path: PathBuf,
