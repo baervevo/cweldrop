@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use crate::app::{
-    App, ChatLine, Delivery, FileInfo, FileState, Focus, LinkRegion, LinkTarget, PeerStatus,
+    App, ChatLine, Delivery, FileInfo, FileState, Focus, LinkRegion, LinkTarget, Peer, PeerStatus,
 };
 use crate::files;
 use crate::links;
@@ -64,11 +64,7 @@ fn draw_peers(f: &mut Frame, app: &App, area: Rect) {
                 PeerStatus::Offline => ("∅", Color::DarkGray),
                 PeerStatus::Error => ("✗", Color::Red),
             };
-            let line = Line::from(vec![
-                Span::styled(format!("{sym} "), Style::default().fg(color)),
-                Span::raw(p.username.clone()),
-            ]);
-            ListItem::new(line)
+            ListItem::new(Line::from(peer_label(p, sym, color)))
         })
         .collect();
 
@@ -150,8 +146,9 @@ fn draw_right(f: &mut Frame, app: &mut App, area: Rect) {
             if p.is_typing() {
                 lines.push(typing_line(&p.username));
             }
+            let ident = identity_note(p);
             let title = match p.status {
-                PeerStatus::Online => format!("chat with {} [online]", p.username),
+                PeerStatus::Online => format!("chat with {} [online]{ident}", p.username),
                 PeerStatus::Connecting => format!("chat with {} [connecting…]", p.username),
                 PeerStatus::Available => {
                     format!("chat with {} [press Enter to connect]", p.username)
@@ -407,6 +404,50 @@ fn file_spans(f: &FileInfo, is_me: bool) -> Vec<Span<'static>> {
     ]
 }
 
+/// Peer list entry: status dot, badges, name and a short key fingerprint so
+/// two people with the same nickname can be told apart.
+fn peer_label(p: &Peer, sym: &str, color: Color) -> Vec<Span<'static>> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut spans = vec![Span::styled(format!("{sym} "), Style::default().fg(color))];
+    if p.warning.is_some() {
+        spans.push(Span::styled(
+            "⚠ ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
+    } else if p.verified {
+        spans.push(Span::styled("✔ ", Style::default().fg(Color::Green)));
+    }
+    let name_style = if p.warning.is_some() {
+        Style::default().fg(Color::Red)
+    } else {
+        Style::default()
+    };
+    spans.push(Span::styled(p.username.clone(), name_style));
+    match (p.pubkey.as_deref(), p.fingerprint()) {
+        (Some(_), Some(fp)) => spans.push(Span::styled(format!(" {fp}"), dim)),
+        (None, Some(fp)) => spans.push(Span::styled(format!(" {fp}?"), dim)),
+        (None, None) if p.status == PeerStatus::Online => spans.push(Span::styled(
+            " unverified",
+            Style::default().fg(Color::Yellow),
+        )),
+        _ => {}
+    }
+    spans
+}
+
+/// Identity part of the chat title.
+fn identity_note(p: &Peer) -> String {
+    match (&p.warning, &p.pubkey) {
+        (Some(w), _) => format!(" ⚠ {w}"),
+        (None, Some(k)) if p.verified => format!(" · key {} ✔ verified", &k[..8.min(k.len())]),
+        (None, Some(k)) => format!(" · key {} (:verify)", &k[..8.min(k.len())]),
+        (None, None) if p.status == PeerStatus::Online => {
+            " · ⚠ unverified: old client, identity not proven".to_string()
+        }
+        _ => String::new(),
+    }
+}
+
 /// A `w`×`h` rect centred in `area` (clamped to fit).
 fn centered(area: Rect, w: u16, h: u16) -> Rect {
     let w = w.min(area.width);
@@ -545,23 +586,17 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{ChatLine, Peer};
+    use crate::app::ChatLine;
     use ratatui::{backend::TestBackend, Terminal};
 
     fn app_with_messages(bodies: &[&str]) -> App {
         let mut app = App::new("me".into(), 7421);
-        app.peers.push(Peer {
-            id: "p".into(),
-            username: "them".into(),
-            addr: None,
-            status: PeerStatus::Online,
-            last_error: None,
-            pubkey: None,
-            typing_at: None,
-            chain: false,
-            claimed_pubkey: None,
-            mdns_id: None,
-        });
+        app.peers.push(Peer::new(
+            "p".into(),
+            "them".into(),
+            None,
+            PeerStatus::Online,
+        ));
         app.history.insert(
             "p".into(),
             bodies
@@ -682,6 +717,41 @@ mod tests {
         assert!(text.contains(":accept or :reject"), "{text}");
         assert!(text.contains("saved to /tmp/notes.txt"), "{text}");
         assert!(app.link_regions.is_empty());
+    }
+
+    #[test]
+    fn peer_labels_show_identity() {
+        let mut app = App::new("me".into(), 7421);
+        let key = "2fa6e4c84f12469fc1e46382b46c41c0859be1565aa55611c0254d0693e93399";
+        app.peers.push(Peer {
+            pubkey: Some(key.into()),
+            verified: true,
+            ..Peer::new("a".into(), "alice".into(), None, PeerStatus::Online)
+        });
+        app.peers.push(Peer {
+            pubkey: Some("9c1d".repeat(16)),
+            warning: Some("not the alice you know".into()),
+            ..Peer::new("b".into(), "alice".into(), None, PeerStatus::Online)
+        });
+        app.peers.push(Peer::new(
+            "c".into(),
+            "oldie".into(),
+            None,
+            PeerStatus::Online,
+        ));
+        app.peers.push(Peer {
+            claimed_pubkey: Some("77".repeat(32)),
+            ..Peer::new("d".into(), "dora".into(), None, PeerStatus::Available)
+        });
+        let text = screen_text(&mut app, 120, 12);
+        assert!(text.contains("✔ alice 2fa6e4c8"), "{text}");
+        assert!(text.contains("⚠ alice 9c1d9c1d"), "{text}");
+        assert!(text.contains("oldie unverified"), "{text}");
+        assert!(text.contains("dora 77777777?"), "{text}");
+        assert!(text.contains("key 2fa6e4c8 ✔ verified"), "title: {text}");
+        app.selected = 1;
+        let text = screen_text(&mut app, 120, 12);
+        assert!(text.contains("⚠ not the alice you know"), "{text}");
     }
 
     #[test]

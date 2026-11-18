@@ -61,7 +61,20 @@ cweldrop --port 7422 --nick b
 | `:view [n]`    | Show the newest (or n-th newest) image in this chat (also: click its name) |
 | `:settings`    | Settings panel: incoming file policy (ask / auto-accept / reject), size cap, download folder |
 | `:verify`      | Show the safety code for this chat; if your peer sees the same code, you hold each other's real keys |
+| `:verify confirm` / `:verify forget` | Mark this contact's key as verified (✔), or undo it |
 | `:q`           | Quit                                |
+
+## Identity
+
+A peer is its ed25519 key, not its nickname. Each install generates a key
+once (`identity.key`); the handshake proves possession of it. The peer list
+shows a short key fingerprint next to every name (`alice 2fa6e4c8`; a `?`
+means announced over mDNS but not yet proven). Keys are pinned on first
+use: if someone answers for a known peer with a different key, the
+connection is refused (`key mismatch`), and a new key that uses the name of
+a contact you already know is flagged in red (`⚠ not the alice you know`).
+Compare safety codes with `:verify`, then `:verify confirm` to get a ✔.
+Old clients without keys are shown as `unverified`.
 
 ## Wire protocol
 

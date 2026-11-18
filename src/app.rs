@@ -41,6 +41,10 @@ pub struct Peer {
     /// mDNS instance id announcing this peer, when the row has another id
     /// (a connection or contact row that absorbed the discovery).
     pub mdns_id: Option<PeerId>,
+    /// The user compared safety codes with this key (`:verify confirm`).
+    pub verified: bool,
+    /// Identity warning, e.g. a new key using a known contact's name.
+    pub warning: Option<String>,
 }
 
 /// How long a "typing…" indicator stays visible after the last ping. The
@@ -49,6 +53,31 @@ pub struct Peer {
 pub const TYPING_TTL: Duration = Duration::from_secs(5);
 
 impl Peer {
+    pub fn new(id: PeerId, username: String, addr: Option<SocketAddr>, status: PeerStatus) -> Self {
+        Self {
+            id,
+            username,
+            addr,
+            status,
+            last_error: None,
+            pubkey: None,
+            typing_at: None,
+            chain: false,
+            claimed_pubkey: None,
+            mdns_id: None,
+            verified: false,
+            warning: None,
+        }
+    }
+
+    /// Short key fingerprint for display: verified key, else the claimed one.
+    pub fn fingerprint(&self) -> Option<&str> {
+        self.pubkey
+            .as_deref()
+            .or(self.claimed_pubkey.as_deref())
+            .map(|k| &k[..8.min(k.len())])
+    }
+
     /// Key under which chat lines are stored in `App.history` for this peer.
     /// Verified peers use their pubkey so transcripts survive across nicks and
     /// connection ids; unverified peers fall back to the connection id.
@@ -269,17 +298,12 @@ impl App {
                 .and_then(|c| c.name(&pk))
                 .or(from_history)
                 .unwrap_or_else(|| format!("{}…", &pk[..8]));
+            let verified = self.chains.as_ref().is_some_and(|c| c.is_verified(&pk));
             self.peers.push(Peer {
-                id: format!("contact:{pk}"),
-                username,
-                addr: None,
-                status: PeerStatus::Offline,
-                last_error: None,
                 pubkey: Some(pk.clone()),
-                typing_at: None,
                 chain: true,
-                claimed_pubkey: None,
-                mdns_id: None,
+                verified,
+                ..Peer::new(format!("contact:{pk}"), username, None, PeerStatus::Offline)
             });
             self.rebuild_chain_lines(&pk);
         }
@@ -460,6 +484,30 @@ impl App {
         self.peers.iter().position(|p| p.id == id)
     }
 
+    /// Warn when `pubkey` uses a name that belongs to a different key we know.
+    fn impostor_warning(&self, pubkey: &str, username: &str) -> Option<String> {
+        let mut known: Vec<(String, String)> = self
+            .chains
+            .as_ref()
+            .map(|c| c.names().into_iter().collect())
+            .unwrap_or_default();
+        known.extend(
+            self.peers
+                .iter()
+                .filter_map(|p| p.pubkey.clone().map(|k| (k, p.username.clone()))),
+        );
+        known
+            .into_iter()
+            .find(|(k, name)| k != pubkey && name.eq_ignore_ascii_case(username))
+            .map(|(k, _)| {
+                format!(
+                    "not the {username} you know: their key is {}, this one is {}",
+                    &k[..8.min(k.len())],
+                    &pubkey[..8.min(pubkey.len())]
+                )
+            })
+    }
+
     /// Row for an mDNS instance id: its own row, or one that absorbed it.
     fn mdns_row(&self, id: &str) -> Option<usize> {
         self.peer_index(id).or_else(|| {
@@ -510,16 +558,8 @@ impl App {
                     }
                 } else {
                     self.peers.push(Peer {
-                        id,
-                        username,
-                        addr: Some(addr),
-                        status: PeerStatus::Available,
-                        last_error: None,
-                        pubkey: None,
-                        typing_at: None,
-                        chain: false,
                         claimed_pubkey: pubkey,
-                        mdns_id: None,
+                        ..Peer::new(id, username, Some(addr), PeerStatus::Available)
                     });
                 }
             }
@@ -542,18 +582,8 @@ impl App {
                     } else {
                         format!("incoming:{addr}")
                     };
-                    self.peers.push(Peer {
-                        id,
-                        username,
-                        addr: Some(addr),
-                        status: PeerStatus::Connecting,
-                        last_error: None,
-                        pubkey: None,
-                        typing_at: None,
-                        chain: false,
-                        claimed_pubkey: None,
-                        mdns_id: None,
-                    });
+                    self.peers
+                        .push(Peer::new(id, username, Some(addr), PeerStatus::Connecting));
                 }
             }
             AppEvent::PeerConnected {
@@ -574,9 +604,32 @@ impl App {
                 username,
             } => {
                 if let Some(idx) = self.peer_index(&id) {
+                    // Key pinning: a row that already stands for a key (an
+                    // earlier session, a contact, or the key announced over
+                    // mDNS) must not be taken over by a different key.
+                    let row = &self.peers[idx];
+                    if let Some(expected) = row.pubkey.as_ref().or(row.claimed_pubkey.as_ref()) {
+                        if *expected != pubkey {
+                            let msg = format!(
+                                "key mismatch: expected {}, got {} — not the peer you know",
+                                &expected[..8.min(expected.len())],
+                                &pubkey[..8.min(pubkey.len())]
+                            );
+                            tracing::warn!(%id, %expected, got = %pubkey, "peer key mismatch");
+                            let row = &mut self.peers[idx];
+                            row.status = PeerStatus::Error;
+                            row.last_error = Some(msg.clone());
+                            self.status_msg = msg;
+                            self.outbox.push(NetCmd::Disconnect { id });
+                            return;
+                        }
+                    }
                     let conn_id = self.peers[idx].id.clone();
                     let auth_ip = self.peers[idx].addr.map(|a| a.ip());
                     self.peers[idx].pubkey = Some(pubkey.clone());
+                    self.peers[idx].verified =
+                        self.chains.as_ref().is_some_and(|c| c.is_verified(&pubkey));
+                    self.peers[idx].warning = self.impostor_warning(&pubkey, &username);
                     if !username.is_empty() {
                         self.peers[idx].username = username;
                     }
@@ -1183,6 +1236,39 @@ impl App {
                 }
                 Vec::new()
             }
+            "verify" if !arg.is_empty() => {
+                let confirm = match arg {
+                    "confirm" | "ok" | "yes" => true,
+                    "forget" | "reset" => false,
+                    _ => {
+                        self.status_msg = "usage: :verify [confirm|forget]".into();
+                        return Vec::new();
+                    }
+                };
+                let Some(pk) = self.selected_peer().and_then(|p| p.pubkey.clone()) else {
+                    self.status_msg = "verify needs a peer that completed the key handshake".into();
+                    return Vec::new();
+                };
+                if let Some(c) = &self.chains {
+                    if let Err(e) = c.set_verified(&pk, confirm) {
+                        self.status_msg = format!("could not save: {e}");
+                        return Vec::new();
+                    }
+                }
+                for p in self
+                    .peers
+                    .iter_mut()
+                    .filter(|p| p.pubkey.as_deref() == Some(pk.as_str()))
+                {
+                    p.verified = confirm;
+                }
+                self.status_msg = if confirm {
+                    "marked as verified ✔".into()
+                } else {
+                    "verification removed".into()
+                };
+                Vec::new()
+            }
             "verify" => {
                 let keys = (
                     self.self_pubkey.as_deref().and_then(decode32),
@@ -1200,7 +1286,7 @@ impl App {
                             "🔒".into(),
                             format!(
                                 "safety code with {name}: {code} — if they see the same code, \
-                                 you're talking to the right person"
+                                 you're talking to the right person (then :verify confirm)"
                             ),
                         ));
                         self.chat_scroll = 0;
@@ -1861,6 +1947,85 @@ mod tests {
             app.selected_peer().unwrap().pubkey.as_deref(),
             Some(pk.as_str())
         );
+    }
+
+    /// Issue #8: a row stands for a key; a different key can't take it over.
+    #[test]
+    fn key_mismatch_is_refused() {
+        let mut app = App::new("me".into(), 7421);
+        let (real, fake) = (unique_pubkey(), unique_pubkey());
+        discover(&mut app, "mdns:alice", "192.0.2.7:7421", Some(&real));
+        // We dial the announced alice, but whoever answers proves another key.
+        app.on_event(AppEvent::PeerConnecting {
+            id: "mdns:alice".into(),
+            addr: "192.0.2.7:7421".parse().unwrap(),
+            dialed: true,
+        });
+        app.on_event(AppEvent::PeerAuthenticated {
+            id: "mdns:alice".into(),
+            pubkey: fake.clone(),
+            username: "alice".into(),
+        });
+        let p = &app.peers[0];
+        assert_eq!(p.status, PeerStatus::Error);
+        assert!(p.last_error.as_deref().unwrap().contains("key mismatch"));
+        assert_eq!(p.pubkey, None, "fake key not adopted");
+        assert!(matches!(&app.outbox[..], [NetCmd::Disconnect { id }] if id == "mdns:alice"));
+        assert!(!app.history.contains_key(&fake));
+    }
+
+    /// Issue #8: same nickname, different key than a known contact.
+    #[test]
+    fn impostor_using_known_name_is_flagged() {
+        let (me, alice) = (test_identity(), test_identity());
+        let chains = test_chains(&me);
+        chains.set_name(&alice.pubkey_hex(), "alice").unwrap();
+        let mut app = App::new("me".into(), 7421).with_chains(chains);
+        let mallory = unique_pubkey();
+        inbound_auth(
+            &mut app,
+            "inbound:192.0.2.66:5000",
+            "192.0.2.66:5000",
+            &mallory,
+        );
+        let p = app
+            .peers
+            .iter()
+            .find(|p| p.pubkey.as_deref() == Some(mallory.as_str()))
+            .unwrap();
+        let w = p.warning.as_deref().expect("flagged");
+        assert!(w.contains("not the alice you know"), "{w}");
+
+        // The real alice is not flagged.
+        let mut app2 = App::new("me".into(), 7421).with_chains(test_chains(&me));
+        inbound_auth(
+            &mut app2,
+            "inbound:x",
+            "192.0.2.7:5000",
+            &alice.pubkey_hex(),
+        );
+        assert!(app2.peers.iter().all(|p| p.warning.is_none()));
+    }
+
+    #[test]
+    fn verify_confirm_persists_badge() {
+        let (me, them) = (test_identity(), test_identity());
+        let chains = test_chains(&me);
+        chains.compose(&them.pubkey_hex(), "hi").unwrap();
+        let mut app = App::new("me".into(), 7421)
+            .with_pubkey(me.pubkey_hex())
+            .with_chains(Arc::clone(&chains));
+        assert!(!app.peers[0].verified);
+        app.run_command("verify confirm");
+        assert!(app.peers[0].verified);
+        assert!(chains.is_verified(&them.pubkey_hex()));
+        // Reloaded contacts keep the badge.
+        let again = App::new("me".into(), 7421).with_chains(Arc::clone(&chains));
+        assert!(again.peers[0].verified);
+        app.run_command("verify forget");
+        assert!(!app.peers[0].verified && !chains.is_verified(&them.pubkey_hex()));
+        app.run_command("verify bogus");
+        assert!(app.status_msg.contains("usage"));
     }
 
     #[test]

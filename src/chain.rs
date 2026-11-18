@@ -499,6 +499,8 @@ pub struct Chains {
     open: Mutex<HashMap<String, Chain>>,
     /// Last known display name per peer pubkey (`names.json`), loaded lazily.
     names: Mutex<Option<HashMap<String, String>>>,
+    /// Pubkeys whose safety code the user confirmed (`verified.json`).
+    verified: Mutex<Option<BTreeSet<String>>>,
 }
 
 impl Chains {
@@ -516,6 +518,7 @@ impl Chains {
             root,
             open: Mutex::new(HashMap::new()),
             names: Mutex::new(None),
+            verified: Mutex::new(None),
         })
     }
 
@@ -532,6 +535,51 @@ impl Chains {
                 .unwrap_or_default()
         });
         f(names)
+    }
+
+    /// Every known (pubkey, name) pair.
+    pub fn names(&self) -> HashMap<String, String> {
+        self.with_names(|n| n.clone())
+    }
+
+    fn verified_path(&self) -> PathBuf {
+        self.root.join("verified.json")
+    }
+
+    fn with_verified<T>(&self, f: impl FnOnce(&mut BTreeSet<String>) -> T) -> T {
+        let mut guard = self.verified.lock().unwrap_or_else(|e| e.into_inner());
+        let set = guard.get_or_insert_with(|| {
+            fs::read(self.verified_path())
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .unwrap_or_default()
+        });
+        f(set)
+    }
+
+    /// Whether the user confirmed the safety code for `peer_hex`.
+    pub fn is_verified(&self, peer_hex: &str) -> bool {
+        self.with_verified(|v| v.contains(peer_hex))
+    }
+
+    /// Record (or revoke) that the user compared safety codes with `peer_hex`.
+    pub fn set_verified(&self, peer_hex: &str, verified: bool) -> Result<()> {
+        let snapshot = self.with_verified(|v| {
+            let changed = if verified {
+                v.insert(peer_hex.to_string())
+            } else {
+                v.remove(peer_hex)
+            };
+            changed.then(|| v.clone())
+        });
+        let Some(set) = snapshot else {
+            return Ok(());
+        };
+        fs::create_dir_all(&self.root)?;
+        let tmp = self.root.join("verified.json.tmp");
+        fs::write(&tmp, serde_json::to_vec_pretty(&set)?)?;
+        fs::rename(&tmp, self.verified_path())?;
+        Ok(())
     }
 
     /// Last name seen for `peer_hex`, for listing offline contacts.
@@ -795,6 +843,19 @@ mod tests {
         chains.set_name("ab", "bob").unwrap();
         let reopened = Chains::open_in(me, root.clone());
         assert_eq!(reopened.name("ab").as_deref(), Some("bob"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn verified_persists() {
+        let me = Arc::new(identity());
+        let root = std::env::temp_dir().join(format!("cweldrop-chains-{}", rand::random::<u64>()));
+        let chains = Chains::open_in(Arc::clone(&me), root.clone());
+        assert!(!chains.is_verified("ab"));
+        chains.set_verified("ab", true).unwrap();
+        assert!(Chains::open_in(Arc::clone(&me), root.clone()).is_verified("ab"));
+        chains.set_verified("ab", false).unwrap();
+        assert!(!Chains::open_in(me, root.clone()).is_verified("ab"));
         let _ = fs::remove_dir_all(&root);
     }
 
