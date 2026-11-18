@@ -11,10 +11,17 @@ pub fn handle_key(app: &mut App, k: KeyEvent) -> Vec<NetCmd> {
         return Vec::new();
     }
 
-    // The image viewer is modal: any of these close it, other keys are ignored.
+    // The viewer is modal: close or scroll, other keys are ignored.
     if app.viewer.is_some() {
-        if matches!(k.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
-            app.close_viewer();
+        match k.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => app.close_viewer(),
+            KeyCode::Up | KeyCode::Char('k') => app.scroll_viewer(-1),
+            KeyCode::Down | KeyCode::Char('j') => app.scroll_viewer(1),
+            KeyCode::PageUp => app.scroll_viewer(-20),
+            KeyCode::PageDown | KeyCode::Char(' ') => app.scroll_viewer(20),
+            KeyCode::Home | KeyCode::Char('g') => app.scroll_viewer(i32::MIN / 2),
+            KeyCode::End | KeyCode::Char('G') => app.scroll_viewer(i32::MAX / 2),
+            _ => {}
         }
         return Vec::new();
     }

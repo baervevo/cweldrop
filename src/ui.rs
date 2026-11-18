@@ -13,6 +13,7 @@ use crate::app::{
 };
 use crate::files;
 use crate::links;
+use crate::preview::Content;
 
 /// Style for links in chat. `link_regions` keys off it, so nothing else in
 /// the chat pane may use this exact style.
@@ -342,7 +343,7 @@ fn link_targets(history: &[ChatLine]) -> Vec<(String, LinkTarget)> {
         match &cl.file {
             Some(f) => {
                 if let Some(path) = viewable(f) {
-                    out.push((f.name.clone(), LinkTarget::Image(path.clone())));
+                    out.push((f.name.clone(), LinkTarget::File(path.clone())));
                 }
             }
             None => {
@@ -357,11 +358,9 @@ fn link_targets(history: &[ChatLine]) -> Vec<(String, LinkTarget)> {
     out
 }
 
-/// Path to open in the viewer, if this transfer is a finished image.
+/// Path to open in the viewer, if this transfer finished.
 fn viewable(f: &FileInfo) -> Option<&std::path::PathBuf> {
-    f.path
-        .as_ref()
-        .filter(|_| f.state == FileState::Done && files::is_image(&f.name))
+    f.path.as_ref().filter(|_| f.state == FileState::Done)
 }
 
 /// "📎 name (size) — state" for a file transfer line.
@@ -387,10 +386,16 @@ fn file_spans(f: &FileInfo, is_me: bool) -> Vec<Span<'static>> {
                 .add_modifier(Modifier::BOLD),
         ),
         FileState::Transferring(b) => (format!("{}%", pct(*b)), Style::default().fg(Color::Yellow)),
-        FileState::Done if viewable(f).is_some() => ("click or :view to open".to_string(), dim),
-        FileState::Done if is_me => ("sent".to_string(), dim),
         FileState::Done => match &f.path {
-            Some(p) => (format!("saved to {}", p.display()), dim),
+            Some(_) if is_me => ("sent · click or :view to open".to_string(), dim),
+            Some(p) if files::is_image(&f.name) => (
+                format!("click or :view to open · saved to {}", p.display()),
+                dim,
+            ),
+            Some(p) => (
+                format!("click or :view to preview · saved to {}", p.display()),
+                dim,
+            ),
             None => ("received".to_string(), dim),
         },
         FileState::Rejected => ("declined".to_string(), dim),
@@ -512,20 +517,31 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
 fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
     let Some(v) = app.viewer.as_mut() else { return };
     f.render_widget(Clear, area);
+    let hint = match v.content {
+        Some(Content::Text(_)) => "↑/↓ PgUp/PgDn scroll · Esc to close",
+        _ => "Esc to close",
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(format!("{} — Esc to close", v.name))
+        .title(format!("{} — {hint}", v.name))
         .border_style(Style::default().fg(Color::Magenta));
     let inner = block.inner(area);
     f.render_widget(block, area);
-    match (&mut v.image, &v.error) {
+    match (&mut v.content, &v.error) {
         (_, Some(e)) => f.render_widget(
-            Paragraph::new(format!("cannot show image: {e}"))
-                .style(Style::default().fg(Color::Red)),
+            Paragraph::new(format!("cannot show {}: {e}", v.name))
+                .style(Style::default().fg(Color::Red))
+                .wrap(Wrap { trim: false }),
             inner,
         ),
-        (Some(img), None) => {
+        (Some(Content::Image(img)), None) => {
             f.render_stateful_widget(ratatui_image::StatefulImage::default(), inner, &mut img.0)
+        }
+        (Some(Content::Text(text)), None) => {
+            let para = Paragraph::new(text.clone()).wrap(Wrap { trim: false });
+            let max = (para.line_count(inner.width) as u16).saturating_sub(inner.height);
+            v.scroll = v.scroll.min(max);
+            f.render_widget(para.scroll((v.scroll, 0)), inner);
         }
         (None, None) => f.render_widget(
             Paragraph::new("loading…").style(Style::default().fg(Color::DarkGray)),
@@ -587,6 +603,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 mod tests {
     use super::*;
     use crate::app::ChatLine;
+    use ratatui::text::Text;
     use ratatui::{backend::TestBackend, Terminal};
 
     fn app_with_messages(bodies: &[&str]) -> App {
@@ -699,7 +716,7 @@ mod tests {
             .first()
             .expect("image name is clickable")
             .clone();
-        assert_eq!(r.target, LinkTarget::Image("/tmp/cat.png".into()));
+        assert_eq!(r.target, LinkTarget::File("/tmp/cat.png".into()));
         app.click(r.x_start, r.y);
         assert_eq!(app.pending_view, Some("/tmp/cat.png".into()));
         assert!(app.viewer.is_some());
@@ -708,15 +725,39 @@ mod tests {
     }
 
     #[test]
-    fn pending_and_non_image_files_are_not_clickable() {
+    fn only_finished_files_are_clickable() {
         let mut app = app_with_messages(&[]);
         let h = app.history.get_mut("p").unwrap();
         h.push(file_line("cat.png", FileState::AwaitingDecision));
         h.push(file_line("notes.txt", FileState::Done));
-        let text = screen_text(&mut app, 100, 10);
+        let text = screen_text(&mut app, 160, 10);
         assert!(text.contains(":accept or :reject"), "{text}");
-        assert!(text.contains("saved to /tmp/notes.txt"), "{text}");
-        assert!(app.link_regions.is_empty());
+        assert!(
+            text.contains("click or :view to preview · saved to /tmp/notes.txt"),
+            "{text}"
+        );
+        let targets: Vec<_> = app.link_regions.iter().map(|r| r.target.clone()).collect();
+        assert_eq!(targets, vec![LinkTarget::File("/tmp/notes.txt".into())]);
+    }
+
+    #[test]
+    fn text_viewer_renders_and_scrolls() {
+        let mut app = app_with_messages(&[]);
+        app.open_viewer("/tmp/notes.txt".into());
+        let body: Vec<Line> = (1..=100).map(|i| Line::raw(format!("line {i}"))).collect();
+        app.viewer.as_mut().unwrap().content = Some(Content::Text(Text::from(body)));
+        let text = screen_text(&mut app, 80, 20);
+        assert!(text.contains("notes.txt — ↑/↓ PgUp/PgDn scroll"), "{text}");
+        assert!(text.contains("line 1 "), "{text}");
+        app.scroll_viewer(50);
+        let text = screen_text(&mut app, 80, 20);
+        assert!(text.contains("line 51"), "{text}");
+        assert!(!text.contains("line 1 "), "{text}");
+        // Scrolling past the end clamps to the last page.
+        app.scroll_viewer(10_000);
+        let text = screen_text(&mut app, 80, 20);
+        assert!(text.contains("line 100"), "{text}");
+        assert!(app.viewer.as_ref().unwrap().scroll <= 100);
     }
 
     #[test]

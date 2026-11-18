@@ -109,10 +109,10 @@ pub enum AppEvent {
         file_id: String,
         error: String,
     },
-    /// An image the user asked to view finished decoding (off the UI thread).
-    ImageDecoded {
+    /// A file the user asked to view finished loading (off the UI thread).
+    ViewerLoaded {
         path: PathBuf,
-        result: Result<ImageProto, String>,
+        result: Result<crate::preview::Content, String>,
     },
 }
 

@@ -32,6 +32,7 @@ ratatui-image = { version = "8.1.1", default-features = false, features = ["cros
 base64 = "0.22"
 sha2 = "0.10"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+ansi-to-tui = "7"
 
 [profile.release]
 lto = "thin"

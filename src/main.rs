@@ -1,5 +1,4 @@
 use std::io;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,7 +21,7 @@ use tracing::{error, info};
 
 use cweldrop::app::App;
 use cweldrop::chain::Chains;
-use cweldrop::event::{AppEvent, ImageProto};
+use cweldrop::event::AppEvent;
 use cweldrop::identity::Identity;
 use cweldrop::net::NetCmd;
 use cweldrop::settings::Settings;
@@ -169,6 +168,8 @@ async fn run_ui<B: ratatui::backend::Backend>(
                     }
                     Some(Ok(CtEvent::Mouse(m))) => match m.kind {
                         MouseEventKind::Down(MouseButton::Left) => app.click(m.column, m.row),
+                        MouseEventKind::ScrollUp if app.viewer.is_some() => app.scroll_viewer(-3),
+                        MouseEventKind::ScrollDown if app.viewer.is_some() => app.scroll_viewer(3),
                         MouseEventKind::ScrollUp => {
                             app.chat_scroll = app.chat_scroll.saturating_add(3);
                         }
@@ -207,9 +208,8 @@ async fn run_ui<B: ratatui::backend::Backend>(
         if let Some(path) = app.pending_view.take() {
             let (picker, evt_tx) = (picker.clone(), evt_tx.clone());
             tokio::task::spawn_blocking(move || {
-                let result =
-                    decode_image(&path).map(|img| ImageProto(picker.new_resize_protocol(img)));
-                let _ = evt_tx.blocking_send(AppEvent::ImageDecoded { path, result });
+                let result = cweldrop::preview::load(&path, &picker);
+                let _ = evt_tx.blocking_send(AppEvent::ViewerLoaded { path, result });
             });
         }
         if std::mem::take(&mut app.needs_clear) {
@@ -254,27 +254,6 @@ fn image_picker() -> Picker {
     };
     picker.set_protocol_type(proto);
     picker
-}
-
-/// Decode an image for the viewer. Files come from peers, so cap dimensions
-/// and allocation to keep a crafted image from exhausting memory.
-fn decode_image(path: &PathBuf) -> std::result::Result<image::DynamicImage, String> {
-    let mut reader = image::ImageReader::open(path)
-        .map_err(|e| e.to_string())?
-        .with_guessed_format()
-        .map_err(|e| e.to_string())?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(16_384);
-    limits.max_image_height = Some(16_384);
-    limits.max_alloc = Some(512 * 1024 * 1024);
-    reader.limits(limits);
-    let img = reader.decode().map_err(|e| e.to_string())?;
-    // Nothing on a terminal needs more than this; keeps re-encoding cheap.
-    Ok(if img.width() > 4096 || img.height() > 4096 {
-        img.thumbnail(4096, 4096)
-    } else {
-        img
-    })
 }
 
 fn default_nick() -> String {

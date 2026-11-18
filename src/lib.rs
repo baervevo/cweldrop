@@ -9,5 +9,6 @@ pub mod input;
 pub mod links;
 pub mod net;
 pub mod notify;
+pub mod preview;
 pub mod settings;
 pub mod ui;

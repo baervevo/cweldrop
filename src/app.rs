@@ -7,10 +7,11 @@ use std::time::{Duration, Instant, SystemTime};
 use chrono::{DateTime, Utc};
 
 use crate::chain::{self, Chains};
-use crate::event::{AppEvent, ImageProto};
+use crate::event::AppEvent;
 use crate::files;
 use crate::history_store;
 use crate::net::{NetCmd, PeerId};
+use crate::preview::Content;
 use crate::settings::Settings;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,14 +169,16 @@ pub enum Focus {
 /// Rows of the settings panel, in display order.
 pub const SETTINGS_ROWS: usize = 3;
 
-/// Full-screen image viewer state.
+/// Full-screen file viewer state.
 #[derive(Debug)]
 pub struct Viewer {
     pub name: String,
     pub path: PathBuf,
-    /// `None` while decoding.
-    pub image: Option<ImageProto>,
+    /// `None` while loading.
+    pub content: Option<Content>,
     pub error: Option<String>,
+    /// First visible line (text only); clamped when drawn.
+    pub scroll: u16,
 }
 
 pub struct App {
@@ -227,7 +230,8 @@ pub struct App {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkTarget {
     Url(String),
-    Image(PathBuf),
+    /// A received or sent file, opened in the viewer.
+    File(PathBuf),
 }
 
 /// A horizontal run of screen cells that shows (part of) a link.
@@ -814,10 +818,10 @@ impl App {
                     }
                 }
             }
-            AppEvent::ImageDecoded { path, result } => {
+            AppEvent::ViewerLoaded { path, result } => {
                 if let Some(v) = self.viewer.as_mut().filter(|v| v.path == path) {
                     match result {
-                        Ok(img) => v.image = Some(img),
+                        Ok(c) => v.content = Some(c),
                         Err(e) => v.error = Some(e),
                     }
                 }
@@ -881,12 +885,12 @@ impl App {
             .find(|r| r.y == y && (r.x_start..r.x_end).contains(&x));
         match hit.map(|r| r.target.clone()) {
             Some(LinkTarget::Url(url)) => self.request_open(url),
-            Some(LinkTarget::Image(path)) => self.open_viewer(path),
+            Some(LinkTarget::File(path)) => self.open_viewer(path),
             None => {}
         }
     }
 
-    /// Show `path` in the image viewer; the main loop decodes it.
+    /// Show `path` in the viewer; the main loop loads it.
     pub fn open_viewer(&mut self, path: PathBuf) {
         let name = path
             .file_name()
@@ -895,8 +899,9 @@ impl App {
         self.viewer = Some(Viewer {
             name,
             path: path.clone(),
-            image: None,
+            content: None,
             error: None,
+            scroll: 0,
         });
         self.pending_view = Some(path);
     }
@@ -907,13 +912,20 @@ impl App {
         }
     }
 
-    /// Received or sent images in the selected chat that exist on disk,
-    /// oldest first, as (display name, path).
-    pub fn selected_chat_images(&self) -> Vec<(String, PathBuf)> {
+    /// Scroll the text viewer by `delta` lines.
+    pub fn scroll_viewer(&mut self, delta: i32) {
+        if let Some(v) = self.viewer.as_mut() {
+            v.scroll = (v.scroll as i32 + delta).clamp(0, u16::MAX as i32) as u16;
+        }
+    }
+
+    /// Finished transfers in the selected chat (viewable files), oldest
+    /// first, as (display name, path).
+    pub fn selected_chat_files(&self) -> Vec<(String, PathBuf)> {
         self.selected_chat()
             .iter()
             .filter_map(|cl| cl.file.as_ref())
-            .filter(|f| f.state == FileState::Done && files::is_image(&f.name))
+            .filter(|f| f.state == FileState::Done)
             .filter_map(|f| f.path.clone().map(|p| (f.name.clone(), p)))
             .collect()
     }
@@ -1220,7 +1232,7 @@ impl App {
             "accept" | "a" => self.decide_offer(arg, true),
             "reject" => self.decide_offer(arg, false),
             "view" | "v" => {
-                let imgs = self.selected_chat_images();
+                let imgs = self.selected_chat_files();
                 let n = if arg.is_empty() {
                     Ok(1)
                 } else {
@@ -1231,7 +1243,7 @@ impl App {
                         let path = imgs[imgs.len() - n].1.clone();
                         self.open_viewer(path);
                     }
-                    _ if imgs.is_empty() => self.status_msg = "no images in this chat".into(),
+                    _ if imgs.is_empty() => self.status_msg = "no files in this chat".into(),
                     _ => self.status_msg = format!("pick 1..{}", imgs.len()),
                 }
                 Vec::new()
@@ -1646,7 +1658,7 @@ mod tests {
         });
         assert_eq!(state_of(&app, "f1"), FileState::Done);
         assert_eq!(
-            app.selected_chat_images(),
+            app.selected_chat_files(),
             vec![("cat.png".to_string(), PathBuf::from("/tmp/cat.png"))]
         );
         app.run_command("view");
