@@ -44,7 +44,7 @@ cweldrop --port 7422 --nick b
 | `↑`/`↓`, `j/k` | Move peer selection                            |
 | `Enter` (list) | Connect to selected peer (if not already)      |
 | `Enter` (input)| Send message to selected peer                  |
-| `:`            | Command line                                   |
+| `:`            | Command line with a fuzzy-search hint panel: ↑/↓ or Ctrl-P/N pick, Tab completes, Enter runs |
 | Click link     | Open it in the browser (Shift+drag to select text) |
 | `Ctrl-C`       | Quit                                           |
 
@@ -64,6 +64,7 @@ cweldrop --port 7422 --nick b
 | `:verify`      | Show the safety code for this chat; if your peer sees the same code, you hold each other's real keys |
 | `:verify confirm` / `:verify forget` | Mark this contact's key as verified (✔), or undo it |
 | `:q`           | Quit                                |
+| `:help`        | List all commands in the hint panel |
 
 ## Identity
 

@@ -101,11 +101,26 @@ fn handle_command(app: &mut App, k: KeyEvent) -> Vec<NetCmd> {
             app.focus = Focus::Input;
             Vec::new()
         }
-        KeyCode::Enter => {
-            let line = std::mem::take(&mut app.command);
-            app.command_cursor = 0;
-            app.focus = Focus::Input;
-            app.run_command(&line)
+        KeyCode::Enter => app.command_enter(),
+        KeyCode::Up => {
+            app.command_move(-1);
+            Vec::new()
+        }
+        KeyCode::Down => {
+            app.command_move(1);
+            Vec::new()
+        }
+        KeyCode::Char('p') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.command_move(-1);
+            Vec::new()
+        }
+        KeyCode::Char('n') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.command_move(1);
+            Vec::new()
+        }
+        KeyCode::Tab => {
+            app.command_complete();
+            Vec::new()
         }
         KeyCode::Left => {
             move_cursor_left(&app.command, &mut app.command_cursor);
@@ -125,14 +140,17 @@ fn handle_command(app: &mut App, k: KeyEvent) -> Vec<NetCmd> {
         }
         KeyCode::Backspace => {
             delete_before_cursor(&mut app.command, &mut app.command_cursor);
+            app.cmd_sel = 0;
             Vec::new()
         }
         KeyCode::Delete => {
             delete_at_cursor(&mut app.command, app.command_cursor);
+            app.cmd_sel = 0;
             Vec::new()
         }
         KeyCode::Char(c) => {
             insert_at_cursor(&mut app.command, &mut app.command_cursor, c);
+            app.cmd_sel = 0;
             Vec::new()
         }
         _ => Vec::new(),

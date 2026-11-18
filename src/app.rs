@@ -284,6 +284,8 @@ pub struct App {
     pub settings_edit: Option<String>,
     /// Highlighted row in the `:files` panel.
     pub files_sel: usize,
+    /// Highlighted suggestion in the command hint panel.
+    pub cmd_sel: usize,
     /// NetCmds produced while handling events; drained by the main loop.
     pub outbox: Vec<NetCmd>,
     pub viewer: Option<Viewer>,
@@ -339,6 +341,7 @@ impl App {
             settings_sel: 0,
             settings_edit: None,
             files_sel: 0,
+            cmd_sel: 0,
             outbox: Vec::new(),
             viewer: None,
             pending_view: None,
@@ -1341,6 +1344,63 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// Suggestions for the command being typed (empty once arguments start).
+    pub fn command_suggestions(&self) -> Vec<crate::commands::Suggestion> {
+        if self.command.contains(' ') {
+            Vec::new()
+        } else {
+            crate::commands::suggest(&self.command)
+        }
+    }
+
+    /// The command whose arguments are being typed, for a signature hint.
+    pub fn command_signature(&self) -> Option<&'static crate::commands::CommandSpec> {
+        let (word, _) = self.command.split_once(' ')?;
+        crate::commands::lookup(word.trim())
+    }
+
+    /// Move the suggestion highlight by `delta`, wrapping.
+    pub fn command_move(&mut self, delta: i32) {
+        let n = self.command_suggestions().len() as i32;
+        if n > 0 {
+            self.cmd_sel = (self.cmd_sel as i32 + delta).rem_euclid(n) as usize;
+        }
+    }
+
+    /// Replace the typed word with the highlighted command (Tab).
+    pub fn command_complete(&mut self) -> bool {
+        let Some(s) = self.command_suggestions().into_iter().nth(self.cmd_sel) else {
+            return false;
+        };
+        self.command = if s.spec.args.is_empty() {
+            s.spec.name.to_string()
+        } else {
+            format!("{} ", s.spec.name)
+        };
+        self.command_cursor = self.command.len();
+        self.cmd_sel = 0;
+        true
+    }
+
+    /// Enter on the command line: run what's typed if it names a command;
+    /// otherwise take the highlighted suggestion, running it unless it
+    /// still needs an argument.
+    pub fn command_enter(&mut self) -> Vec<NetCmd> {
+        let word = self.command.split_whitespace().next().unwrap_or("");
+        let exact = crate::commands::lookup(word).is_some();
+        if !exact && !word.is_empty() && self.command_complete() {
+            let needs = crate::commands::lookup(self.command.trim()).is_some_and(|c| c.needs_arg());
+            if needs {
+                return Vec::new(); // stay on the line to type the argument
+            }
+        }
+        let line = std::mem::take(&mut self.command);
+        self.command_cursor = 0;
+        self.cmd_sel = 0;
+        self.focus = Focus::Input;
+        self.run_command(&line)
+    }
+
     /// Returns NetCmds emitted by handling a command-line entry like `:c 1.2.3.4:7421`.
     pub fn run_command(&mut self, line: &str) -> Vec<NetCmd> {
         let line = line.trim();
@@ -1475,6 +1535,14 @@ impl App {
                             "verify needs a peer that completed the key handshake".into()
                     }
                 }
+                Vec::new()
+            }
+            "help" | "h" => {
+                // The hint panel lists every command on an empty `:` line.
+                self.focus = Focus::Command;
+                self.command.clear();
+                self.command_cursor = 0;
+                self.cmd_sel = 0;
                 Vec::new()
             }
             "settings" | "set" => {
@@ -2304,6 +2372,61 @@ mod tests {
         assert_eq!(pick(&items, "notes"), Pick::One(0));
         assert_eq!(pick(&items, "ALL"), Pick::All);
         assert_eq!(pick(&[], ""), Pick::Nothing);
+    }
+
+    fn typed(app: &mut App, text: &str) {
+        app.focus = Focus::Command;
+        app.command = text.into();
+        app.command_cursor = text.len();
+        app.cmd_sel = 0;
+    }
+
+    /// Issue #10: the hint panel's fuzzy pick runs or completes commands.
+    #[test]
+    fn command_panel_enter_runs_or_completes() {
+        let mut app = App::new("me".into(), 7421);
+        typed(&mut app, "stg");
+        app.command_enter();
+        assert_eq!(app.focus, Focus::Settings, "fuzzy 'stg' ran :settings");
+
+        typed(&mut app, "con");
+        assert!(app.command_enter().is_empty());
+        assert_eq!(app.focus, Focus::Command, "connect needs an address");
+        assert_eq!(app.command, "connect ");
+        assert_eq!(app.command_signature().unwrap().name, "connect");
+        app.command.push_str("192.0.2.1:7421");
+        let cmds = app.command_enter();
+        assert!(matches!(&cmds[..], [NetCmd::Connect { .. }]));
+        assert_eq!(app.focus, Focus::Input);
+
+        // An exact command runs as typed, even if a suggestion is highlighted.
+        typed(&mut app, "q");
+        app.command_enter();
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn command_panel_tab_and_arrows() {
+        let mut app = App::new("me".into(), 7421);
+        typed(&mut app, "");
+        let all = app.command_suggestions().len();
+        assert_eq!(all, crate::commands::COMMANDS.len());
+        app.command_move(-1);
+        assert_eq!(app.cmd_sel, all - 1, "wraps upward");
+        app.command_move(1);
+        assert_eq!(app.cmd_sel, 0);
+
+        typed(&mut app, "fil");
+        assert!(app.command_complete());
+        assert_eq!(app.command, "files", "no args: no trailing space");
+        typed(&mut app, "sen");
+        app.command_complete();
+        assert_eq!(app.command, "send ");
+        assert!(app.command_suggestions().is_empty(), "signature mode");
+
+        app.run_command("help");
+        assert_eq!(app.focus, Focus::Command);
+        assert!(app.command.is_empty());
     }
 
     #[test]

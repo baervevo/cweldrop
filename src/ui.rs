@@ -204,7 +204,7 @@ fn draw_right(f: &mut Frame, app: &mut App, area: Rect) {
     let (input_title, content, prefix_len, cursor_chars, is_active) = if app.focus == Focus::Command
     {
         (
-            "command (Enter=run, Esc=cancel)".to_string(),
+            "command (Enter=run, Tab=complete, ↑/↓=pick, Esc=cancel)".to_string(),
             format!(":{}", app.command),
             1u16,
             char_offset(&app.command, app.command_cursor),
@@ -233,6 +233,10 @@ fn draw_right(f: &mut Frame, app: &mut App, area: Rect) {
         .block(input_block)
         .scroll((0, scroll_x));
     f.render_widget(input, input_area);
+
+    if app.focus == Focus::Command {
+        draw_command_hints(f, app, input_area);
+    }
 
     if is_active && input_inner.width > 0 && input_inner.height > 0 {
         let visible_col = cursor_col - scroll_x;
@@ -513,6 +517,91 @@ fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title("settings")
+        .border_style(Style::default().fg(Color::Magenta));
+    f.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
+/// Completion-style panel above the command line: fuzzy-matched commands
+/// while the name is typed, then the chosen command's signature.
+fn draw_command_hints(f: &mut Frame, app: &App, input: Rect) {
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut lines: Vec<Line> = Vec::new();
+    let suggestions = app.command_suggestions();
+    let sel = app.cmd_sel.min(suggestions.len().saturating_sub(1));
+    let max_rows = 10usize;
+    if let Some(spec) = app.command_signature() {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(":{} ", spec.name),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(spec.args, Style::default().fg(Color::Cyan)),
+        ]));
+        lines.push(Line::from(Span::styled(spec.desc, dim)));
+    } else if suggestions.is_empty() {
+        lines.push(Line::from(Span::styled("no matching command", dim)));
+    } else {
+        let first = sel.saturating_sub(max_rows - 1);
+        let args_w = suggestions
+            .iter()
+            .map(|s| s.spec.args.len())
+            .max()
+            .unwrap_or(0);
+        let name_w = suggestions
+            .iter()
+            .map(|s| s.spec.name.len())
+            .max()
+            .unwrap_or(0);
+        for (i, s) in suggestions.iter().enumerate().skip(first).take(max_rows) {
+            let base = if i == sel {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            let mut spans = vec![Span::styled(" :", base)];
+            for (ci, ch) in s.spec.name.chars().enumerate() {
+                let st = if s.name_hits.contains(&ci) {
+                    base.fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                } else {
+                    base
+                };
+                spans.push(Span::styled(ch.to_string(), st));
+            }
+            let pad = name_w - s.spec.name.len() + 1;
+            spans.push(Span::styled(" ".repeat(pad), base));
+            spans.push(Span::styled(
+                format!("{:<args_w$}", s.spec.args),
+                base.fg(Color::Cyan),
+            ));
+            spans.push(Span::styled(
+                format!(" {} ", s.spec.desc),
+                base.fg(Color::Gray),
+            ));
+            lines.push(Line::from(spans));
+        }
+    }
+    let width = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 2;
+    let height = lines.len() as u16 + 2;
+    let width = width.min(input.width.max(20));
+    let height = height.min(input.y);
+    if height < 3 {
+        return;
+    }
+    let popup = Rect {
+        x: input.x,
+        y: input.y - height,
+        width,
+        height,
+    };
+    f.render_widget(Clear, popup);
+    let title = if app.command_signature().is_some() {
+        "usage"
+    } else {
+        "commands"
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
         .border_style(Style::default().fg(Color::Magenta));
     f.render_widget(Paragraph::new(lines).block(block), popup);
 }
@@ -857,6 +946,25 @@ mod tests {
         let old = text.find("2. ready    old.txt").expect(&text);
         assert!(new < old, "{text}");
         assert!(text.contains("files in this chat"), "{text}");
+    }
+
+    #[test]
+    fn command_hints_render_matches_and_usage() {
+        let mut app = app_with_messages(&[]);
+        app.focus = Focus::Command;
+        let text = screen_text(&mut app, 120, 30);
+        assert!(text.contains(":connect"), "{text}");
+        assert!(text.contains("Offer a file to the selected peer"), "{text}");
+        app.command = "vw".into();
+        let text = screen_text(&mut app, 120, 30);
+        assert!(text.contains("Open an image or text file"), "{text}");
+        assert!(!text.contains(":connect"), "{text}");
+        app.command = "send ".into();
+        let text = screen_text(&mut app, 120, 30);
+        assert!(text.contains("usage"), "{text}");
+        assert!(text.contains(":send <path>"), "{text}");
+        app.command = "xyzzy".into();
+        assert!(screen_text(&mut app, 120, 30).contains("no matching command"));
     }
 
     #[test]
